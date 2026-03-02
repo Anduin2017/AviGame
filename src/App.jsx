@@ -10,7 +10,7 @@ const DRAG_COEFF = 0.05;
 const MAX_THRUST = 900;            
 const STALL_ANGLE = 0.38;          
 const GEAR_DRAG = 0.15;            
-const FUEL_CONSUMPTION = 0.05;     
+const FUEL_CONSUMPTION = 2.0;      // 基础燃耗 %/s，按油门线性；另加起落架/襟翼附加消耗
 
 // 降落安全阈值
 const MAX_LANDING_VY = 180;        // 最大安全接地垂直率
@@ -29,9 +29,9 @@ export default function App() {
     
     // 控制器视觉状态
     const [knobY, setKnobY] = useState(0);         
-    const [throttleY, setThrottleY] = useState(126); // 对齐初始 40% 油门视觉位置 
-    const [flapsLevel, setFlapsLevel] = useState(0); // 0, 1, 2, 3
-    const [isGearDown, setIsGearDown] = useState(false);
+    const [throttleY, setThrottleY] = useState(9999); // 初始设为极大值，让 clamp 处理；将在 mount 后由 DOM 动态纠正
+    const [flapsLevel, setFlapsLevel] = useState(1); // 初始设定为 Flaps 1
+    const [isGearDown, setIsGearDown] = useState(true); // 起飞前起落架放下
     
     // 游戏核心状态
     const gameState = useRef(null);
@@ -40,8 +40,8 @@ export default function App() {
 
     // 初始化物理状态
     const initGameState = (width, height) => ({
-        y: height / 2,         
-        vx: 250,               
+        y: height - 38,        // 起始在跑道上 (GROUND_Y=height-20, gearExt=18)
+        vx: 0,                 // 初始静止
         vy: 0,                 
         pitch: 0,              
         
@@ -53,21 +53,26 @@ export default function App() {
         
         aoa: 0,                
         gamma: 0,              
-        speed: 250,            
+        speed: 0,              // 初始速度为零
         isStalled: false,      
-        onGround: false,       // 是否在跑道上滑行
+        onGround: true,        // 游戏开始时在跑道上
         
         inputY: 0,             // 摇杆
-        throttle: 0.4,         
-        flaps: 0,              
-        gear: false,           
+        throttle: 0.0,         // 油门完全慢车
+        flaps: 1,              // 襟翼 1
+        gear: true,            // 起落架放下
         
         obstacles: [],
-        runways: [],           // 跑道数组
+        runways: [{ x: 0, width: 2500, scored: true }], // 起始跑道 (scored避免重复计分)
         lastObstacleX: 0,
+        runwaysGenerated: 0, // 已生成的跑道降落挑战次数
         particles: [],
-        messages: [],          // 浮动文本提示 (如完美降落)
+        messages: [{ text: '✈  READY FOR DEPARTURE', life: 3.0 }],
         
+        lowFuelWarned20: false,  // 20% 低油量警告已弹出
+        lowFuelWarned10: false,  // 10% BINGO 警告已弹出
+        flameoutWarned:  false,  // 熄火提示已弹出
+
         isGameOver: false,
         failReason: '',
     });
@@ -78,9 +83,13 @@ export default function App() {
         
         setUiScore(0);
         setKnobY(0);
-        setThrottleY(126); // 视觉复位
-        setFlapsLevel(0);
-        setIsGearDown(false);
+        // 动态计算慢车位置：throttle=0 时滑块在轨道最底部
+        if (throttleTrackRef.current) {
+            const maxY = throttleTrackRef.current.getBoundingClientRect().height - 40;
+            setThrottleY(maxY);
+        }
+        setFlapsLevel(1);  // 襟翼 1
+        setIsGearDown(true); // 起落架放下
         setGameStatus('playing');
         
         lastTimeRef.current = performance.now();
@@ -198,10 +207,17 @@ export default function App() {
         const restoringRate = (state.gamma - state.pitch) * 2.5; 
         const dynamicPressure = Math.max(state.speed * state.speed, 10000);
         const fbwElevatorLimit = Math.min(1.0, 90000 / dynamicPressure);
-        const elevatorRate = -state.inputY * 1.5 * fbwElevatorLimit;
+
+        // 在跑道上且起落架放下且空速 < 110 时，操纵杆不影响飞机姿态（地面操控不够气动权限）
+        const groundLocked = state.onGround && state.gear && state.speed < 110;
+        const elevatorRate = groundLocked ? 0 : (-state.inputY * 1.5 * fbwElevatorLimit);
 
         let pitchRate = 0;
-        if (state.isStalled) {
+        if (groundLocked) {
+            // 强制将俯仰角归零，杆输入无效
+            state.pitch *= 0.85;
+            pitchRate = 0;
+        } else if (state.isStalled) {
             pitchRate = restoringRate * 2.0 + elevatorRate * 0.1; 
         } else {
             pitchRate = restoringRate + elevatorRate;
@@ -234,7 +250,27 @@ export default function App() {
         let actualThrust = 0;
         if (state.fuel > 0) {
             actualThrust = MAX_THRUST * state.throttle;
-            state.fuel -= state.throttle * FUEL_CONSUMPTION * dt;
+            // 燃料消耗：基础油门消耗 + 起落架阻力附加 + 逐档襟翼附加
+            const gearDrain  = state.gear  ? 0.30 : 0.0;           // 起落架：+0.30%/s
+            const flapsDrain = state.flaps * 0.15;                  // 每档襟翼：+0.15%/s
+            state.fuel -= (state.throttle * FUEL_CONSUMPTION + gearDrain + flapsDrain) * dt;
+            state.fuel = Math.max(0, state.fuel);
+
+            // 低燃料警告（只弹一次）
+            if (state.fuel <= 20 && !state.lowFuelWarned20) {
+                state.lowFuelWarned20 = true;
+                state.messages.push({ text: '⚠ FUEL LOW — 20%', life: 3.0 });
+            }
+            if (state.fuel <= 10 && !state.lowFuelWarned10) {
+                state.lowFuelWarned10 = true;
+                state.messages.push({ text: '🔴 BINGO FUEL — 10%  LAND NOW!', life: 4.0 });
+            }
+        } else {
+            // 燃料耗尽：熄火，在 HUD 给出提示（只弹一次）
+            if (!state.flameoutWarned) {
+                state.flameoutWarned = true;
+                state.messages.push({ text: '💀 ENGINE FLAMEOUT — NO FUEL', life: 99 });
+            }
         }
 
         const ThrustX = actualThrust * Math.cos(state.pitch);
@@ -254,7 +290,8 @@ export default function App() {
 
         state.vx += ax * dt;
         state.vy += ay * dt;
-        if (state.vx < 80) state.vx = 80;
+        // 只有在空中才强制最低速度，在跑道滑跑时允许从零开始
+        if (!state.onGround && state.vx < 80) state.vx = 80;
 
         const dx = state.vx * dt;
         state.worldX += dx;
@@ -265,12 +302,24 @@ export default function App() {
             state.lastObstacleX = state.worldX;
             state.obstaclesGenerated += 1;
             
-            if (state.obstaclesGenerated % 10 === 0) {
-                // 生成降落跑道
+            if (state.obstaclesGenerated % 15 === 0) {
+                // 生成降落跑道（每次越来越短；4次后锁死在最短长度）
+                state.runwaysGenerated += 1;
+                const MIN_RUNWAY_WIDTH = 400;
+                const BASE_RUNWAY_WIDTH = 3000;
+                const runwayWidth = state.runwaysGenerated <= 4
+                    ? Math.max(MIN_RUNWAY_WIDTH, Math.round(BASE_RUNWAY_WIDTH * Math.pow(0.6, state.runwaysGenerated - 1)))
+                    : MIN_RUNWAY_WIDTH;
                 state.runways.push({
                     x: canvas.width + 100,
-                    width: 3000, 
-                    scored: false
+                    width: runwayWidth,
+                    scored: false,
+                    challengeNum: state.runwaysGenerated,
+                });
+                const isMinLength = runwayWidth <= MIN_RUNWAY_WIDTH;
+                state.messages.push({
+                    text: `🛬 RUNWAY CHALLENGE #${state.runwaysGenerated}  ${runwayWidth}m${isMinLength ? '  ⚠ MINIMUM!' : ''}`,
+                    life: 5.0
                 });
                 // 【物理修复】：跑道上方绝对不刷柱子，强制推迟下一次生成检测
                 state.nextObstacleDist = 3400; 
@@ -278,12 +327,18 @@ export default function App() {
                 // 生成普通障碍物
                 const baseGap = 250;
                 const minGapRatio = 0.125; 
-                const gapRatio = Math.max(minGapRatio, Math.pow(0.5, state.obstaclesGenerated / 20));
+                const gapRatio = Math.max(minGapRatio, Math.pow(0.5, state.obstaclesGenerated / 60));
                 const gapSize = baseGap * gapRatio;
 
                 const safeMinPillar = Math.min(120, canvas.height * 0.2);
                 const safeMaxGapTop = Math.max(safeMinPillar, canvas.height - safeMinPillar - gapSize);
-                const gapTop = safeMinPillar + Math.random() * (safeMaxGapTop - safeMinPillar);
+
+                // 前50个障碍物：开口位置锁定在屏幕中央，随进度线性扩展到完全随机
+                const progressRatio = Math.min(1, state.obstaclesGenerated / 50);
+                const centerY = canvas.height / 2 - gapSize / 2;
+                const interpolatedMin = centerY * (1 - progressRatio) + safeMinPillar * progressRatio;
+                const interpolatedMax = centerY * (1 - progressRatio) + safeMaxGapTop * progressRatio;
+                const gapTop = interpolatedMin + Math.random() * Math.max(0, interpolatedMax - interpolatedMin);
 
                 state.obstacles.push({
                     x: canvas.width + 100, width: 80,
@@ -291,8 +346,14 @@ export default function App() {
                     passed: false
                 });
 
-                // 【物理修复】：如果下一个就是跑道了(逢9)，给予极长的进场空域让你降高度
-                if (state.obstaclesGenerated % 10 === 9) {
+                // 【物理修复】：如果下一个就是跑道了(逢14)，给予极长的进场空域让你降高度
+                if (state.obstaclesGenerated % 15 === 14) {
+                    // 预告即将来临的跑道长度
+                    const nextNum = state.runwaysGenerated + 1;
+                    const nextWidth = nextNum <= 4
+                        ? Math.max(400, Math.round(3000 * Math.pow(0.6, nextNum - 1)))
+                        : 400;
+                    state.messages.push({ text: `⚠ RUNWAY AHEAD: ${nextWidth}m — PREPARE TO LAND`, life: 4.0 });
                     state.nextObstacleDist = 1200; 
                 } else {
                     state.nextObstacleDist = 650;
@@ -375,11 +436,29 @@ export default function App() {
             if (onRunway) {
                 // 如果是瞬间刚接触地面
                 if (!state.onGround) {
-                    if (state.vy > MAX_LANDING_VY || state.speed > MAX_LANDING_SPEED || !state.gear) {
+                    // 接地姿态检查：画布坐标系中 pitch 负值=抬头，正值=低头，与航空惯例相反
+                    // 显示值 = -pitchInternal；安全范围随已完成跑道数收敛：-5~+11 → 0~+6
+                    const pitchDeg = state.pitch * 180 / Math.PI; // 内部值
+                    const t = Math.min(1, state.runwaysGenerated / 8);
+                    const minPitchDisp = -5 + 5 * t;   // -5 → 0
+                    const maxPitchDisp = 11 - 5 * t;   // 11 → 6
+                    // 内部安全范围 = [-maxPitchDisp, -minPitchDisp]
+                    const PITCH_INTERNAL_MIN = -maxPitchDisp;
+                    const PITCH_INTERNAL_MAX = -minPitchDisp;
+                    const pitchBad = pitchDeg < PITCH_INTERNAL_MIN || pitchDeg > PITCH_INTERNAL_MAX;
+
+                    if (!state.gear) {
                         state.isGameOver = true;
-                        if (!state.gear) state.failReason = '未放起落架，机腹擦地损毁';
-                        else if (state.vy > MAX_LANDING_VY) state.failReason = `接地垂直率过大解体 (${Math.round(state.vy)} > ${MAX_LANDING_VY})`;
-                        else state.failReason = `进场速度过快冲出跑道 (${Math.round(state.speed)} > ${MAX_LANDING_SPEED})`;
+                        state.failReason = '未放起落架，机腹擦地损毁';
+                    } else if (pitchBad) {
+                        state.isGameOver = true;
+                        state.failReason = `接地姿态异常 (俯仰 ${(-pitchDeg).toFixed(1)}°，安全范围 ${minPitchDisp.toFixed(0)}° ~ +${maxPitchDisp.toFixed(0)}°)`;
+                    } else if (state.vy > MAX_LANDING_VY) {
+                        state.isGameOver = true;
+                        state.failReason = `接地垂直率过大解体 (${Math.round(state.vy)} > ${MAX_LANDING_VY})`;
+                    } else if (state.speed > MAX_LANDING_SPEED) {
+                        state.isGameOver = true;
+                        state.failReason = `进场速度过快冲出跑道 (${Math.round(state.speed)} > ${MAX_LANDING_SPEED})`;
                     } else {
                         // 成功着陆！
                         state.onGround = true;
@@ -387,7 +466,18 @@ export default function App() {
                             onRunway.scored = true;
                             state.score += 10;
                             setUiScore(state.score);
-                            state.messages.push({ text: '✅ PERFECT LANDING! +10 PTS', life: 3.0 });
+                            const rwLen = onRunway.width;
+                            const isMin = rwLen <= 400;
+                            // 降落即加满燃料
+                            const oldFuel = Math.round(state.fuel);
+                            state.fuel = 100;
+                            state.lowFuelWarned20 = false;
+                            state.lowFuelWarned10 = false;
+                            state.flameoutWarned  = false;
+                            state.messages.push({
+                                text: `✅ PERFECT LANDING! +10  RWY ${rwLen}m${isMin ? ' 🏆 EXTREME!' : ''}  ⛽ REFUELLED`,
+                                life: 4.0
+                            });
                         }
                     }
                 }
@@ -447,6 +537,18 @@ export default function App() {
                 if (r.x + i > 0 && r.x + i < w) {
                     ctx.fillRect(r.x + i, GROUND_Y + 8, 40, 4);
                 }
+            }
+            // 跑道长度标签（仅挑战跑道显示）
+            if (r.challengeNum != null) {
+                const labelX = r.x + r.width / 2;
+                const labelY = GROUND_Y - 8;
+                const isMin = r.width <= 400;
+                ctx.save();
+                ctx.font = 'bold 13px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillStyle = isMin ? '#FF6B6B' : '#F6E05E';
+                ctx.fillText(`#${r.challengeNum}  ${r.width}m${isMin ? ' ⚠' : ''}`, labelX, labelY);
+                ctx.restore();
             }
         });
 
@@ -531,12 +633,29 @@ export default function App() {
         if (state.gear) {
             ctx.fillStyle = '#FFA500';
             ctx.fillText(`GEAR: DOWN`, planeX - 50, planeY - 15);
-            
-            // 显示降落条件检查器
+        }
+
+        // 降落检查单：仅在有起落架 且 在某跑道中点前700px范围内时显示
+        const nearRunway = state.runways.find(r => {
+            const midScreen = r.x + r.width / 2;
+            return !r.scored && midScreen > planeX && (midScreen - planeX) < 700;
+        });
+        if (state.gear && nearRunway) {
+            // 俯仰安全范围随已完成跑道数收敛：-5~+11 → 0~+6（8次后锁死）
+            const t = Math.min(1, state.runwaysGenerated / 8);
+            const minPitchDisp = -5 + 5 * t;   // -5 → 0
+            const maxPitchDisp = 11 - 5 * t;   // 11 → 6
+
             const vyOk = state.vy < MAX_LANDING_VY;
             const spdOk = state.speed < MAX_LANDING_SPEED;
-            ctx.fillStyle = (vyOk && spdOk) ? '#00FF00' : '#FF0000';
-            ctx.fillText(`LND CHK: ${vyOk && spdOk ? 'OK' : 'WARN'}`, planeX - 50, planeY + 15);
+            const pitchDegHud = -(state.pitch * 180 / Math.PI); // 正=抬头/爬升
+            const pitchOk = pitchDegHud >= minPitchDisp && pitchDegHud <= maxPitchDisp;
+            const allOk = vyOk && spdOk && pitchOk;
+            ctx.font = '14px monospace'; ctx.textAlign = 'left';
+            ctx.fillStyle = allOk ? '#00FF00' : '#FF0000';
+            ctx.fillText(`LND CHK: ${allOk ? 'OK' : 'WARN'}`, planeX - 50, planeY + 30);
+            ctx.fillStyle = pitchOk ? '#00FF00' : '#FF0000';
+            ctx.fillText(`PCH: ${pitchDegHud.toFixed(1)}° [${minPitchDisp.toFixed(0)}~+${maxPitchDisp.toFixed(0)}]`, planeX - 50, planeY + 45);
         }
 
         // 浮动文本绘制
@@ -583,6 +702,22 @@ export default function App() {
         window.addEventListener('resize', handleResize);
         handleResize();
         return () => window.removeEventListener('resize', handleResize);
+    }, [gameStatus]);
+
+    // 挂载后动态计算油门初始位置（慢车 = 轨道最底部），避免硬编码像素值在不同屏幕出错
+    useEffect(() => {
+        if (throttleTrackRef.current) {
+            const maxY = throttleTrackRef.current.getBoundingClientRect().height - 40;
+            setThrottleY(maxY);
+        }
+    }, []);
+
+    // 窗口 resize 时同步油门滑块位置（非游戏中保持在慢车底部）
+    useEffect(() => {
+        if (gameStatus !== 'playing' && throttleTrackRef.current) {
+            const maxY = throttleTrackRef.current.getBoundingClientRect().height - 40;
+            setThrottleY(maxY);
+        }
     }, [gameStatus]);
 
     const [dashFuel, setDashFuel] = useState(100);
@@ -744,14 +879,15 @@ export default function App() {
                         <h3 className="text-gray-300 font-bold mb-4 tracking-wider">航线简报 (已接入键盘协议)</h3>
                         <div className="grid grid-cols-3 gap-6 text-sm">
                             <div className="space-y-2">
-                                <p><strong className="text-green-400">跑道降落挑战：</strong> 每过9个柱子，第10关是平坦跑道！在跑道上安全触地奖励 <strong className="text-white">+10分</strong>。跑道很短，必须完成触地复飞(Touch & Go)。</p>
-                                <p className="bg-gray-800 border border-gray-600 p-2 text-gray-300 text-xs">安全降落条件：<br/>1. 必须放下起落架<br/>2. 垂直率 (VY) &lt; 180<br/>3. 空速 (SPD) &lt; 320</p>
+                                <p><strong className="text-green-400">跑道降落挑战：</strong> 每15个障碍物出现一次跑道，安全触地奖励 <strong className="text-white">+10分</strong>，同时<strong className="text-yellow-300">燃料立刻加满</strong>。跑道随关卡越来越短。</p>
+                                <p className="bg-gray-800 border border-gray-600 p-2 text-gray-300 text-xs">安全降落条件：<br/>1. 必须放下起落架<br/>2. 俯仰角 -5°~+11°（随关卡收紧至 0~+6°）<br/>3. 垂直率 (VY) &lt; 180<br/>4. 空速 (SPD) &lt; 320</p>
                             </div>
                             <div className="space-y-2">
-                                <p><strong className="text-orange-400">减速防撞系统：</strong></p>
+                                <p><strong className="text-orange-400">燃料管理：</strong></p>
                                 <ul className="list-disc pl-4 text-gray-400 space-y-1">
-                                    <li>随着分数增加，柱子缝隙将**对数级缩小**。</li>
-                                    <li>后期必须利用**起落架**与**襟翼**配合降低进场速度，否则绝对会撞毁。</li>
+                                    <li>油门越大、起落架/襟翼开着，<strong className="text-white">耗油越快</strong>。</li>
+                                    <li>经济飞行（收轮收翼，低油门）可跳过一个跑道；高阻力飞行必须每次降落加油。</li>
+                                    <li>燃料耗尽 → 引擎熄火，无论油门多大都没有推力。</li>
                                 </ul>
                             </div>
                             <div className="space-y-2">
