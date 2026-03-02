@@ -1,3 +1,20 @@
  @tailwind base;
  @tailwind components;
  @tailwind utilities;
+
+@layer utilities {
+  .animate-gear-warn {
+    animation: gear-warn 0.55s ease-in-out infinite;
+  }
+}
+
+@keyframes gear-warn {
+  0%, 100% {
+    box-shadow: 0 0 6px 3px rgba(239,68,68,0.35), 0 0 18px 6px rgba(239,68,68,0.15);
+    border-color: rgba(239,68,68,0.7);
+  }
+  50% {
+    box-shadow: 0 0 20px 10px rgba(239,68,68,0.95), 0 0 40px 18px rgba(239,68,68,0.55);
+    border-color: rgba(239,68,68,1);
+  }
+}

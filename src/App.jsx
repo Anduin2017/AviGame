@@ -315,6 +315,14 @@ export default function App() {
         state.worldX += dx;
         state.y += state.vy * dt;
 
+        // 移动端水平视野拉伸系数（与 drawEngine 中保持一致）
+        // 用于将生成位置推到屏幕真正的右边缘之外
+        const VIEW_ZOOM = canvas.width < 640 ? 0.52 : 1.0;
+        // 屏幕右边缘对应的世界坐标 (camTx + worldX*ZOOM = canvasWidth → worldX = (canvasWidth - camTx)/ZOOM)
+        // camTx = canvas.width*0.2*(1-ZOOM)，化简后 = canvas.width*(0.8/ZOOM + 0.2)
+        const VIEW_RIGHT_EDGE = Math.ceil(canvas.width * (0.8 / VIEW_ZOOM + 0.2));
+        const SPAWN_X = VIEW_RIGHT_EDGE + 120; // 就在屏幕右边缘外生成
+
         // ================= 动态生成 (对数级缩小缝隙 & 跑道长进场空域) =================
         if (state.worldX - state.lastObstacleX > state.nextObstacleDist) { 
             state.lastObstacleX = state.worldX;
@@ -328,11 +336,17 @@ export default function App() {
                 const runwayWidth = state.runwaysGenerated <= 4
                     ? Math.max(MIN_RUNWAY_WIDTH, Math.round(BASE_RUNWAY_WIDTH * Math.pow(0.6, state.runwaysGenerated - 1)))
                     : MIN_RUNWAY_WIDTH;
+                // 油箱位于跑道进近端（右侧）前 35% 处
+                // 平面坐标: 跑道从 canvas.width+100 起，向右延伸 runwayWidth
+                // 进近方向为向左（plane 从右侧飞入），所以 35% 区域靠近右端
+                const fuelTankOffsetFromLeft = runwayWidth * 0.65; // 距左端 65% = 距右端 35%
                 state.runways.push({
-                    x: canvas.width + 100,
+                    x: SPAWN_X,
                     width: runwayWidth,
                     scored: false,
                     challengeNum: state.runwaysGenerated,
+                    fuelTankX: SPAWN_X + fuelTankOffsetFromLeft,
+                    fuelTankCollected: false,
                 });
                 const isMinLength = runwayWidth <= MIN_RUNWAY_WIDTH;
                 state.messages.push({
@@ -359,7 +373,7 @@ export default function App() {
                 const gapTop = interpolatedMin + Math.random() * Math.max(0, interpolatedMax - interpolatedMin);
 
                 state.obstacles.push({
-                    x: canvas.width + 100, width: 80,
+                    x: SPAWN_X, width: 80,
                     gapTop: gapTop, gapBottom: gapTop + gapSize,
                     passed: false
                 });
@@ -395,6 +409,7 @@ export default function App() {
         for (let i = state.runways.length - 1; i >= 0; i--) {
             let r = state.runways[i];
             r.x -= dx;
+            if (r.fuelTankX !== undefined) r.fuelTankX -= dx;
             if (r.x + r.width < -100) state.runways.splice(i, 1);
         }
 
@@ -404,11 +419,11 @@ export default function App() {
         for (let i = 0; i < bgScrollSpeeds.length; i++) {
             state.bg.offsets[i] += dx * bgScrollSpeeds[i];
         }
-        // 云朵按各自速度滚动，出屏后从右侧重新随机生成
+        // 云朵按各自速度滚动，出屏后从右侧重新随机生成（需覆盖到视野拉伸后的右边缘）
         state.bg.clouds.forEach(c => {
             c.x -= dx * c.speed;
             if (c.x + c.w < 0) {
-                c.x = canvas.width + c.w + Math.random() * 400;
+                c.x = VIEW_RIGHT_EDGE + c.w + Math.random() * 400;
                 c.y = 20 + Math.random() * (canvas.height * 0.38);
             }
         });
@@ -427,7 +442,7 @@ export default function App() {
         }
         if (state.speed > 400 && Math.random() < 0.2) {
             state.particles.push({
-                x: canvas.width, y: Math.random() * canvas.height,
+                x: VIEW_RIGHT_EDGE, y: Math.random() * canvas.height,
                 vx: -state.speed * 1.5, vy: 0,
                 life: 1.0, type: 'wind'
             });
@@ -442,6 +457,29 @@ export default function App() {
         const px = canvas.width * 0.2; 
         const py = state.y;
         const hitboxRadius = 14;
+
+        // 油箱收集检测（飞机必须在地面滑过油箱位置才能加油）
+        for (let r of state.runways) {
+            if (r.fuelTankX !== undefined && !r.fuelTankCollected) {
+                const relX = r.fuelTankX - px; // 正=油箱在飞机右前方，负=油箱已在飞机后方
+                if (relX <= 0 && relX >= -80) {
+                    // 油箱刚刚滚过飞机位置的窗口期（80px 容差）
+                    if (state.onGround) {
+                        // 飞机在地面 → 成功拾取
+                        r.fuelTankCollected = true;
+                        state.fuel = 100;
+                        state.lowFuelWarned20 = false;
+                        state.lowFuelWarned10 = false;
+                        state.flameoutWarned  = false;
+                        state.messages.push({ text: '⛽ 燃油已满！FUEL FULL', life: 3.5 });
+                    }
+                    // 若飞机在空中飞越油箱，不触发（油箱继续留在跑道等待）
+                } else if (relX < -80) {
+                    // 油箱已远远滚过，且飞机从未在地面经过 → 错过，移除标志
+                    r.fuelTankCollected = true;
+                }
+            }
+        }
         
         // 天花板极限
         if (py < -100) {
@@ -501,14 +539,10 @@ export default function App() {
                             setUiScore(state.score);
                             const rwLen = onRunway.width;
                             const isMin = rwLen <= 400;
-                            // 降落即加满燃料
-                            const oldFuel = Math.round(state.fuel);
-                            state.fuel = 100;
-                            state.lowFuelWarned20 = false;
-                            state.lowFuelWarned10 = false;
-                            state.flameoutWarned  = false;
+                            // 检查是否已拿到油箱
+                            const gotFuel = onRunway.fuelTankCollected;
                             state.messages.push({
-                                text: `✅ PERFECT LANDING! +10  RWY ${rwLen}m${isMin ? ' 🏆 EXTREME!' : ''}  ⛽ REFUELLED`,
+                                text: `✅ PERFECT LANDING! +10  RWY ${rwLen}m${isMin ? ' 🏆 EXTREME!' : ''}${gotFuel ? '  ⛽' : '  ⚠ NO FUEL'}`,
                                 life: 4.0
                             });
                         }
@@ -541,6 +575,13 @@ export default function App() {
         if (!state) return;
         const w = ctx.canvas.width; const h = ctx.canvas.height;
         const GROUND_Y = h - 20;
+
+        // ── 移动端水平视野拉伸：缩小 X 轴比例，让画面往右露出更多世界，Y 轴不动 ──
+        // 飞机锚点保持在屏幕 20% 处，障碍物在生成瞬间就进入视野，给足反应时间。
+        const ZOOM = w < 640 ? 0.52 : 1.0;
+        const planeWorldX = w * 0.2;
+        // 令 ZOOM * planeWorldX + tx = planeWorldX → tx = planeWorldX * (1 - ZOOM)
+        const camTx = planeWorldX * (1 - ZOOM);
 
         // =====================================================
         // 视差背景 —— 天空 · 星星 · 多层山脉 · 云朵
@@ -595,6 +636,11 @@ export default function App() {
             ctx.fill();
         });
 
+        // === 游戏世界层：水平缩放（Y 轴不变，地面线保持原位）===
+        ctx.save();
+        ctx.translate(camTx, 0);
+        ctx.scale(ZOOM, 1);
+
         // --- 云朵（按层半透明）---
         if (state.bg.clouds) {
             // 云朵颜色按层：越远越暗越淡
@@ -624,9 +670,9 @@ export default function App() {
         // 以下为原有游戏元素
         // =====================================================
 
-        // 绘制通用地面 (非铺装)
+        // 绘制通用地面 (非铺装) — 覆盖整个视口世界范围（含左侧负坐标区）
         ctx.fillStyle = '#171923'; 
-        ctx.fillRect(0, GROUND_Y, w, 20);
+        ctx.fillRect(-300, GROUND_Y, w / ZOOM + 600, 20);
 
         // 绘制跑道
         state.runways.forEach(r => {
@@ -639,9 +685,9 @@ export default function App() {
             ctx.fillRect(r.x + 60, GROUND_Y, 20, 20);
             ctx.fillRect(r.x + r.width - 40, GROUND_Y, 20, 20);
             ctx.fillRect(r.x + r.width - 80, GROUND_Y, 20, 20);
-            // 跑道中线
+            // 跑道中线（可见范围用 w/ZOOM 判断，确保移动端缩放视口内全程绘制）
             for (let i = 150; i < r.width - 150; i += 80) {
-                if (r.x + i > 0 && r.x + i < w) {
+                if (r.x + i > 0 && r.x + i < w / ZOOM) {
                     ctx.fillRect(r.x + i, GROUND_Y + 8, 40, 4);
                 }
             }
@@ -655,6 +701,51 @@ export default function App() {
                 ctx.textAlign = 'center';
                 ctx.fillStyle = isMin ? '#FF6B6B' : '#F6E05E';
                 ctx.fillText(`#${r.challengeNum}  ${r.width}m${isMin ? ' ⚠' : ''}`, labelX, labelY);
+                ctx.restore();
+            }
+
+            // 绘制油箱标志（35% 进近区，未被拾取时显示）
+            if (r.fuelTankX !== undefined && !r.fuelTankCollected) {
+                const tx = r.fuelTankX;
+                const ty = GROUND_Y;
+                ctx.save();
+                // 闪烁效果：每 0.5 秒闪一次
+                const blink = Math.floor(Date.now() / 500) % 2 === 0;
+                ctx.globalAlpha = blink ? 1.0 : 0.6;
+
+                // 阴影发光
+                ctx.shadowColor = '#FFD700';
+                ctx.shadowBlur = 10;
+
+                // 桶身（圆角矩形近似）
+                const bx = tx - 10, by = ty - 22, bw = 20, bh = 18;
+                ctx.fillStyle = '#E53E3E';
+                ctx.beginPath();
+                ctx.roundRect(bx, by, bw, bh, 3);
+                ctx.fill();
+
+                // 桶盖
+                ctx.fillStyle = '#FC8181';
+                ctx.fillRect(bx + 3, by - 4, bw - 6, 5);
+
+                // 油嘴
+                ctx.fillStyle = '#CBD5E0';
+                ctx.fillRect(tx + 2, by - 9, 4, 6);
+
+                // ⛽ 符号
+                ctx.shadowBlur = 0;
+                ctx.globalAlpha = 1.0;
+                ctx.font = 'bold 11px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillStyle = '#FFD700';
+                ctx.fillText('⛽', tx, by - 10);
+
+                // 下方地面标线（黄色区域提示）
+                ctx.globalAlpha = 0.35;
+                ctx.fillStyle = '#FFD700';
+                ctx.fillRect(r.x + r.width * 0.60, ty, r.width * 0.40, 20);
+                ctx.globalAlpha = 1.0;
+
                 ctx.restore();
             }
         });
@@ -683,6 +774,7 @@ export default function App() {
         
         ctx.save();
         ctx.translate(planeX, planeY);
+        ctx.scale(1 / ZOOM, 1);  // 还原水平比例，飞机形状不变形
         ctx.rotate(state.pitch);
 
         if (state.isStalled) ctx.translate((Math.random()-0.5)*8, (Math.random()-0.5)*8);
@@ -720,7 +812,8 @@ export default function App() {
 
         // HUD 数据投影
         ctx.save();
-        ctx.translate(planeX, planeY); 
+        ctx.translate(planeX, planeY);
+        ctx.scale(1 / ZOOM, 1);  // 还原水平比例，HUD 符号不变形
         ctx.rotate(state.gamma); 
         ctx.strokeStyle = '#00FF00'; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.arc(80, 0, 6, 0, Math.PI*2); 
@@ -728,21 +821,28 @@ export default function App() {
         ctx.moveTo(80, -6); ctx.lineTo(80, -15); ctx.stroke();
         ctx.restore();
 
-        // --- 仅保留 AOA 于飞机旁 ---
-        ctx.font = '13px monospace'; ctx.textAlign = 'left';
-        ctx.fillStyle = Math.abs(state.aoa) > STALL_ANGLE * 0.8 ? '#FF4444' : '#00FF00';
-        ctx.fillText(`AOA ${(state.aoa * 180 / Math.PI).toFixed(1)}°`, planeX - 50, planeY - 42);
+        // === 结束游戏世界缩放层 ===
+        ctx.restore();
 
-        // 浮动文本绘制
+        // --- AOA 标注（屏幕坐标：Y 无缩放，X 锚定飞机屏幕位置）---
+        // 飞机屏幕 X = planeWorldX（由 camTx 锚定），Y = state.y（y轴未缩放）
+        ctx.font = `${ZOOM < 1 ? 11 : 13}px monospace`; ctx.textAlign = 'left';
+        ctx.fillStyle = Math.abs(state.aoa) > STALL_ANGLE * 0.8 ? '#FF4444' : '#00FF00';
+        ctx.fillText(`AOA ${(state.aoa * 180 / Math.PI).toFixed(1)}°`, planeWorldX - 50, state.y - 42);
+
+        // 浮动文本绘制（屏幕坐标）
+        const msgFontSize = ZOOM < 1 ? 20 : 36;
         state.messages.forEach((msg, idx) => {
-            ctx.fillStyle = `rgba(74, 222, 128, ${Math.min(1, msg.life)})`; // 绿色
-            ctx.font = 'bold 36px sans-serif'; ctx.textAlign = 'center';
-            ctx.fillText(msg.text, w/2, h/3 - (idx * 40));
+            ctx.fillStyle = `rgba(74, 222, 128, ${Math.min(1, msg.life)})`;
+            ctx.font = `bold ${msgFontSize}px sans-serif`; ctx.textAlign = 'center';
+            ctx.fillText(msg.text, w / 2, h / 3 - (idx * (msgFontSize + 4)));
         });
 
         if (state.isStalled && Math.floor(Date.now() / 200) % 2 === 0) {
-            ctx.fillStyle = '#FF0000'; ctx.font = 'bold 48px sans-serif'; ctx.textAlign = 'center';
-            ctx.fillText('STALL WARNING', w/2, h/4);
+            ctx.fillStyle = '#FF0000';
+            ctx.font = `bold ${ZOOM < 1 ? 32 : 48}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.fillText('STALL WARNING', w / 2, h / 4);
         }
     };
 
@@ -800,6 +900,15 @@ export default function App() {
     const [dashVS, setDashVS] = useState(0);
     const [dashSpd, setDashSpd] = useState(0);
     const [dashNearRunway, setDashNearRunway] = useState(null);
+    const [gearWarnActive, setGearWarnActive] = useState(false);
+
+    // 移动端检测：宽度 < 640px 视为移动设备
+    const [isMobile, setIsMobile] = useState(() => window.innerWidth < 640);
+    useEffect(() => {
+        const onResize = () => setIsMobile(window.innerWidth < 640);
+        window.addEventListener('resize', onResize);
+        return () => window.removeEventListener('resize', onResize);
+    }, []);
     useEffect(() => {
         if (gameStatus !== 'playing') return;
         const interval = setInterval(() => {
@@ -808,8 +917,12 @@ export default function App() {
                 const cw = canvasRef.current?.width ?? window.innerWidth;
                 const ch = canvasRef.current?.height ?? window.innerHeight;
                 setDashFuel(s.fuel);
-                setDashAlt(Math.max(0, Math.round((ch - 20 - s.y) * 10)));
-                setDashVS(Math.round(-s.vy));   // positive = climbing
+                const altFt = Math.max(0, Math.round((ch - 20 - s.y) * 10));
+                setDashAlt(altFt);
+                const vsVal = Math.round(-s.vy); // positive = climbing
+                setDashVS(vsVal);
+                // 起落架警告：高于 2000ft 且正在爬升且起落架放下
+                setGearWarnActive(!s.isGameOver && s.gear && altFt > 2000 && vsVal > 30);
                 setDashSpd(Math.round(s.speed));
                 const planeX = cw * 0.2;
                 const near = s.runways.find(r => {
@@ -839,64 +952,66 @@ export default function App() {
         <div className="relative w-full h-screen bg-black overflow-hidden touch-none select-none font-mono">
             <canvas ref={canvasRef} className="block w-full h-full" />
 
-            <div className="absolute top-4 w-full flex justify-between px-10 pointer-events-none text-green-400 z-10">
+            <div className="absolute top-2 w-full flex justify-between px-2 sm:top-4 sm:px-10 pointer-events-none text-green-400 z-10">
                 {/* 空速 — 左 */}
-                <div className="flex flex-col items-start bg-green-900/20 px-4 py-2 rounded border border-green-500/30 backdrop-blur-sm">
-                    <span className="text-xs text-green-200 tracking-widest">AIRSPEED</span>
-                    <span className="text-3xl font-bold">{dashSpd} <span className="text-base font-normal opacity-70">KTS</span></span>
+                <div className="flex flex-col items-start bg-green-900/20 px-2 py-1 sm:px-4 sm:py-2 rounded border border-green-500/30 backdrop-blur-sm">
+                    <span className="text-[9px] sm:text-xs text-green-200 tracking-widest">AIRSPEED</span>
+                    <span className="text-lg sm:text-3xl font-bold">{dashSpd} <span className="text-xs sm:text-base font-normal opacity-70">KTS</span></span>
                 </div>
                 {/* 积分 — 中 */}
                 <div className="flex flex-col items-center">
-                    <span className="text-xs text-green-200 tracking-widest">MISSION SCORE</span>
-                    <span className="text-5xl font-black text-white drop-shadow-[0_0_10px_#4ADE80]">{uiScore}</span>
+                    <span className="text-[9px] sm:text-xs text-green-200 tracking-widest">MISSION SCORE</span>
+                    <span className="text-2xl sm:text-5xl font-black text-white drop-shadow-[0_0_10px_#4ADE80]">{uiScore}</span>
                 </div>
                 {/* 高度 + 垂直速度 + 燃料 — 右 */}
                 <div className="flex flex-col items-end gap-1">
-                    <div className="flex items-end gap-4 bg-green-900/20 px-4 py-2 rounded border border-green-500/30 backdrop-blur-sm">
+                    <div className="flex items-end gap-2 sm:gap-4 bg-green-900/20 px-2 py-1 sm:px-4 sm:py-2 rounded border border-green-500/30 backdrop-blur-sm">
                         <div className="flex flex-col items-end">
-                            <span className="text-xs text-green-200 tracking-widest">ALTITUDE</span>
-                            <span className="text-3xl font-bold">{dashAlt} <span className="text-base font-normal opacity-70">FT</span></span>
+                            <span className="text-[9px] sm:text-xs text-green-200 tracking-widest">ALTITUDE</span>
+                            <span className="text-lg sm:text-3xl font-bold">{dashAlt} <span className="text-xs sm:text-base font-normal opacity-70">FT</span></span>
                         </div>
-                        <div className="flex flex-col items-end border-l border-green-500/30 pl-4">
-                            <span className="text-xs text-green-200 tracking-widest">V/S</span>
-                            <span className={`text-xl font-bold ${
+                        <div className="flex flex-col items-end border-l border-green-500/30 pl-2 sm:pl-4">
+                            <span className="text-[9px] sm:text-xs text-green-200 tracking-widest">V/S</span>
+                            <span className={`text-sm sm:text-xl font-bold ${
                                 dashVS > 30 ? 'text-green-400' : dashVS < -30 ? 'text-orange-400' : 'text-yellow-400'
                             }`}>{dashVS > 0 ? '+' : ''}{dashVS}</span>
                         </div>
                     </div>
-                    <div className="flex items-center gap-2 bg-green-900/20 px-4 py-1.5 rounded border border-green-500/30 backdrop-blur-sm w-full">
-                        <span className="text-[10px] text-green-200 tracking-widest">FUEL</span>
-                        <div className="flex-1 h-3 bg-gray-800 border border-green-500/50">
+                    <div className="flex items-center gap-1 sm:gap-2 bg-green-900/20 px-2 py-1 sm:px-4 sm:py-1.5 rounded border border-green-500/30 backdrop-blur-sm w-full">
+                        <span className="text-[9px] sm:text-[10px] text-green-200 tracking-widest">FUEL</span>
+                        <div className="flex-1 h-2 sm:h-3 bg-gray-800 border border-green-500/50">
                             <div className="h-full transition-all duration-200"
                                 style={{ width: `${Math.max(0, dashFuel)}%`, backgroundColor: dashFuel > 20 ? '#4ADE80' : '#F87171' }}/>
                         </div>
-                        <span className="text-[10px] text-green-200 w-8 text-right">{Math.round(dashFuel)}%</span>
+                        <span className="text-[9px] sm:text-[10px] text-green-200 w-6 sm:w-8 text-right">{Math.round(dashFuel)}%</span>
                     </div>
                 </div>
             </div>
 
             {/* ================= 左手侧：飞行控制杆 ================= */}
-            <div className="absolute left-8 top-1/2 -translate-y-1/2 flex items-center pointer-events-none z-20">
+            {/* 移动端: 左下角小型控制杆；桌面端: 左侧居中大型控制杆 */}
+            <div className="absolute left-2 bottom-3 sm:left-8 sm:bottom-auto sm:top-1/2 sm:-translate-y-1/2 flex items-end sm:items-center pointer-events-none z-20">
                 <div 
-                    className="relative w-32 h-[450px] flex justify-center items-center pointer-events-auto touch-none"
+                    className="relative w-20 h-[170px] sm:w-32 sm:h-[450px] flex justify-center items-center pointer-events-auto touch-none"
                     onPointerDown={(e) => { e.target.setPointerCapture(e.pointerId); handleStickEvent(e, true); }}
                     onPointerMove={handleStickEvent}
                     onPointerUp={(e) => { handleStickUp(); try{e.target.releasePointerCapture(e.pointerId)}catch(e){} }}
                 >
-                    <div ref={stickTrackRef} className="relative w-10 h-[300px] bg-gray-900/80 rounded-full border border-gray-600 shadow-[inset_0_0_20px_#000] flex justify-center items-center pointer-events-none">
-                        <div className="absolute w-12 h-[80%] border-x-4 border-gray-800 rounded-full opacity-50"></div>
+                    <div ref={stickTrackRef} className="relative w-7 h-[130px] sm:w-10 sm:h-[300px] bg-gray-900/80 rounded-full border border-gray-600 shadow-[inset_0_0_20px_#000] flex justify-center items-center pointer-events-none">
+                        <div className="absolute w-8 sm:w-12 h-[80%] border-x-4 border-gray-800 rounded-full opacity-50"></div>
                         <div 
                             style={{ transform: `translateY(${knobY}px)` }}
-                            className="absolute w-20 h-24 bg-gradient-to-b from-gray-300 to-gray-600 rounded-t-2xl rounded-b-lg shadow-[0_15px_30px_rgba(0,0,0,0.8)] border-2 border-gray-400 flex flex-col items-center justify-start pt-2"
+                            className="absolute w-12 h-14 sm:w-20 sm:h-24 bg-gradient-to-b from-gray-300 to-gray-600 rounded-t-2xl rounded-b-lg shadow-[0_15px_30px_rgba(0,0,0,0.8)] border-2 border-gray-400 flex flex-col items-center justify-start pt-1 sm:pt-2"
                         >
-                            <div className="w-6 h-4 bg-red-500 rounded-sm mb-1 shadow-[inset_0_2px_4px_rgba(0,0,0,0.5)]"></div> 
-                            <div className="w-12 h-1 bg-gray-800 rounded-full opacity-50 mt-2"></div>
-                            <div className="w-12 h-1 bg-gray-800 rounded-full opacity-50 mt-1"></div>
+                            <div className="w-4 h-3 sm:w-6 sm:h-4 bg-red-500 rounded-sm mb-1 shadow-[inset_0_2px_4px_rgba(0,0,0,0.5)]"></div> 
+                            <div className="w-8 sm:w-12 h-1 bg-gray-800 rounded-full opacity-50 mt-1 sm:mt-2"></div>
+                            <div className="w-8 sm:w-12 h-1 bg-gray-800 rounded-full opacity-50 mt-1"></div>
                         </div>
                     </div>
                 </div>
                 
-                <div className="ml-6 flex flex-col justify-between h-[300px] text-left text-xs opacity-70 border-l border-green-500/30 pl-4">
+                {/* 桌面端才显示操作提示标签 */}
+                <div className="hidden sm:flex ml-6 flex-col justify-between h-[300px] text-left text-xs opacity-70 border-l border-green-500/30 pl-4">
                     <div className="text-green-300">
                         <span className="block font-bold">▲ NOSE DOWN</span>
                         <span>俯冲加速</span>
@@ -909,32 +1024,35 @@ export default function App() {
             </div>
 
             {/* ================= 右手侧：HOTAS 油门与控制面板 ================= */}
-            <div className="absolute right-8 top-1/2 -translate-y-1/2 h-[500px] flex items-center gap-6 pointer-events-none z-20">
+            {/* 移动端: 右下角紧凑布局；桌面端: 右侧居中大型面板 */}
+            <div className="absolute right-2 bottom-3 sm:right-8 sm:bottom-auto sm:top-1/2 sm:-translate-y-1/2 sm:h-[500px] flex items-end sm:items-center gap-2 sm:gap-6 pointer-events-none z-20">
                 {/* ===== 起落架手柄 ===== */}
                 <div className="flex flex-col items-center pointer-events-auto select-none">
-                    <span className="text-[10px] text-gray-400 mb-1 font-bold tracking-widest">GEAR (G)</span>
+                    <span className="text-[8px] sm:text-[10px] text-gray-400 mb-0.5 sm:mb-1 font-bold tracking-widest">GEAR (G)</span>
                     {/* 滑轨 */}
-                    <div className="relative w-12 h-40 bg-gray-950 border border-gray-600 rounded-2xl shadow-[inset_0_0_12px_rgba(0,0,0,0.8)]">
+                    <div className="relative w-8 h-24 sm:w-12 sm:h-40 bg-gray-950 border border-gray-600 rounded-2xl shadow-[inset_0_0_12px_rgba(0,0,0,0.8)]">
                         {/* UP / DN 标签 */}
-                        <span className="absolute top-2 left-1/2 -translate-x-1/2 text-[9px] text-gray-500 font-bold z-10 pointer-events-none">UP</span>
-                        <span className="absolute bottom-2 left-1/2 -translate-x-1/2 text-[9px] text-gray-500 font-bold z-10 pointer-events-none">DN</span>
+                        <span className="absolute top-1 sm:top-2 left-1/2 -translate-x-1/2 text-[7px] sm:text-[9px] text-gray-500 font-bold z-10 pointer-events-none">UP</span>
+                        <span className="absolute bottom-1 sm:bottom-2 left-1/2 -translate-x-1/2 text-[7px] sm:text-[9px] text-gray-500 font-bold z-10 pointer-events-none">DN</span>
                         {/* 中央导轨线 */}
-                        <div className="absolute top-6 bottom-6 left-1/2 -translate-x-1/2 w-0.5 bg-gray-700 rounded-full"></div>
+                        <div className="absolute top-4 sm:top-6 bottom-4 sm:bottom-6 left-1/2 -translate-x-1/2 w-0.5 bg-gray-700 rounded-full"></div>
                         {/* 手柄（带轮子图案）*/}
                         <div
                             onClick={toggleGear}
                             style={{
-                                top: isGearDown ? '76px' : '8px',
+                                top: isGearDown ? (isMobile ? '46px' : '76px') : (isMobile ? '4px' : '8px'),
                                 transition: 'top 0.45s cubic-bezier(0.25,0.46,0.45,0.94)',
                             }}
-                            className={`absolute left-1/2 -translate-x-1/2 w-11 h-14 rounded-xl cursor-pointer flex flex-col items-center justify-center gap-0.5 shadow-lg border-2 ${
-                                isGearDown
+                            className={`absolute left-1/2 -translate-x-1/2 w-7 h-8 sm:w-11 sm:h-14 rounded-xl cursor-pointer flex flex-col items-center justify-center gap-0.5 shadow-lg border-2 ${
+                                gearWarnActive
+                                    ? 'bg-gradient-to-b from-red-700 to-red-900 border-red-400 animate-gear-warn'
+                                    : isGearDown
                                     ? 'bg-gradient-to-b from-orange-600 to-orange-800 border-orange-400 shadow-[0_0_12px_rgba(251,146,60,0.6)]'
                                     : 'bg-gradient-to-b from-gray-500 to-gray-700 border-gray-400'
                             }`}
                         >
                             {/* 轮子 SVG */}
-                            <svg width="26" height="26" viewBox="0 0 26 26" fill="none">
+                            <svg width="16" height="16" viewBox="0 0 26 26" fill="none" className="sm:hidden">
                                 <circle cx="13" cy="13" r="11" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="2.2"/>
                                 <circle cx="13" cy="13" r="3" fill={isGearDown ? '#fcd34d' : '#9ca3af'}/>
                                 <line x1="13" y1="2" x2="13" y2="24" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="1.4"/>
@@ -942,32 +1060,40 @@ export default function App() {
                                 <line x1="4.8" y1="4.8" x2="21.2" y2="21.2" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="1.4"/>
                                 <line x1="21.2" y1="4.8" x2="4.8" y2="21.2" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="1.4"/>
                             </svg>
-                            {/* 手柄纹理横条 */}
-                            <div className="flex flex-col gap-0.5">
+                            <svg width="26" height="26" viewBox="0 0 26 26" fill="none" className="hidden sm:block">
+                                <circle cx="13" cy="13" r="11" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="2.2"/>
+                                <circle cx="13" cy="13" r="3" fill={isGearDown ? '#fcd34d' : '#9ca3af'}/>
+                                <line x1="13" y1="2" x2="13" y2="24" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="1.4"/>
+                                <line x1="2" y1="13" x2="24" y2="13" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="1.4"/>
+                                <line x1="4.8" y1="4.8" x2="21.2" y2="21.2" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="1.4"/>
+                                <line x1="21.2" y1="4.8" x2="4.8" y2="21.2" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="1.4"/>
+                            </svg>
+                            {/* 手柄纹理横条：仅桌面端显示 */}
+                            <div className="hidden sm:flex flex-col gap-0.5">
                                 <div className={`w-7 h-0.5 rounded-full ${isGearDown ? 'bg-orange-300/50' : 'bg-gray-400/40'}`}></div>
                                 <div className={`w-7 h-0.5 rounded-full ${isGearDown ? 'bg-orange-300/50' : 'bg-gray-400/40'}`}></div>
                             </div>
                         </div>
                     </div>
                     {/* 三绿灯：起落架锁定指示 */}
-                    <div className="mt-2 flex gap-1.5">
+                    <div className="mt-1 sm:mt-2 flex gap-1 sm:gap-1.5">
                         {[0,1,2].map(i => (
-                            <div key={i} className={`w-2.5 h-2.5 rounded-full border transition-all duration-300 ${
+                            <div key={i} className={`w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full border transition-all duration-300 ${
                                 isGearDown ? 'bg-green-400 border-green-300 shadow-[0_0_5px_#4ADE80]' : 'bg-gray-800 border-gray-600'
                             }`}/>
                         ))}
                     </div>
                 </div>
 
-                <div className="flex flex-col items-center pointer-events-auto h-[250px] justify-between bg-gray-900/50 p-2 rounded-lg border border-gray-700 mt-10 relative">
-                    <span className="text-[10px] text-green-400 font-bold mb-2">FLAPS (F/⇧F)</span>
-                    <div className="flex flex-col gap-2 flex-1 justify-between">
+                <div className="flex flex-col items-center pointer-events-auto h-auto sm:h-[250px] justify-between bg-gray-900/50 p-1.5 sm:p-2 rounded-lg border border-gray-700 mt-0 sm:mt-10 relative">
+                    <span className="text-[8px] sm:text-[10px] text-green-400 font-bold mb-1 sm:mb-2">FLAPS</span>
+                    <div className="flex flex-col gap-1 sm:gap-2 flex-1 justify-between">
                         {/* 修正：0档位在最上，3档位在最下 */}
                         {[0, 1, 2, 3].map(level => (
                             <button 
                                 key={level}
                                 onClick={() => handleFlapsSelect(level)}
-                                className={`w-10 h-10 rounded text-sm font-bold border transition-colors ${
+                                className={`w-7 h-7 sm:w-10 sm:h-10 rounded text-xs sm:text-sm font-bold border transition-colors ${
                                     flapsLevel === level 
                                     ? 'bg-green-600 border-green-300 text-white shadow-[0_0_10px_#4ADE80]' 
                                     : 'bg-gray-800 border-gray-600 text-gray-400 hover:bg-gray-700'
@@ -979,36 +1105,36 @@ export default function App() {
                     </div>
                 </div>
 
-                <div className="relative flex flex-col items-center h-full ml-4">
-                    <span className="text-green-400 font-bold mb-3 tracking-widest">THR (PgUp/Dn)</span>
+                <div className="relative flex flex-col items-center h-[130px] sm:h-full ml-1 sm:ml-4">
+                    <span className="hidden sm:block text-green-400 font-bold mb-3 tracking-widest">THR (PgUp/Dn)</span>
                     <div 
-                        className="relative w-16 flex-1 bg-gray-900 rounded-sm border-2 border-gray-600 pointer-events-auto shadow-[0_0_20px_rgba(0,0,0,0.8)] touch-none"
+                        className="relative w-8 sm:w-16 h-[110px] sm:flex-1 bg-gray-900 rounded-sm border-2 border-gray-600 pointer-events-auto shadow-[0_0_20px_rgba(0,0,0,0.8)] touch-none"
                         ref={throttleTrackRef}
                         onPointerDown={(e) => { e.target.setPointerCapture(e.pointerId); handleThrottleEvent(e, true); }}
                         onPointerMove={handleThrottleEvent}
                         onPointerUp={(e) => { handleThrottleEvent(e, false); try{e.target.releasePointerCapture(e.pointerId)}catch(e){} }}
                     >
-                        <div className="absolute left-0 w-full h-full flex flex-col justify-between py-4 pointer-events-none opacity-50">
-                            {[100,80,60,40,20,0].map(val => (
-                                <div key={val} className="flex items-center text-[10px] text-white">
-                                    <div className="w-3 h-px bg-white ml-1"></div>
-                                    <span className="ml-1">{val}%</span>
+                        <div className="absolute left-0 w-full h-full flex flex-col justify-between py-2 sm:py-4 pointer-events-none opacity-50">
+                            {[100,60,20].map(val => (
+                                <div key={val} className="flex items-center text-[8px] sm:text-[10px] text-white">
+                                    <div className="w-2 sm:w-3 h-px bg-white ml-0.5 sm:ml-1"></div>
+                                    <span className="ml-0.5 sm:ml-1 hidden sm:inline">{val}%</span>
                                 </div>
                             ))}
                         </div>
                         <div 
                             style={{ top: `${throttleY}px` }}
-                            className="absolute left-1/2 -translate-x-1/2 w-24 h-14 bg-gradient-to-r from-gray-600 via-gray-400 to-gray-600 border border-gray-300 rounded-sm shadow-2xl cursor-pointer flex items-center justify-end pr-2"
+                            className="absolute left-1/2 -translate-x-1/2 w-12 h-8 sm:w-24 sm:h-14 bg-gradient-to-r from-gray-600 via-gray-400 to-gray-600 border border-gray-300 rounded-sm shadow-2xl cursor-pointer flex items-center justify-end pr-1 sm:pr-2"
                         >
-                            <div className="w-2 h-8 bg-red-500/80 rounded-sm"></div>
+                            <div className="w-1.5 h-5 sm:w-2 sm:h-8 bg-red-500/80 rounded-sm"></div>
                         </div>
                     </div>
                 </div>
             </div>
 
-            {/* ================= 着陆检查单（右下角） ================= */}
+            {/* ================= 着陆检查单（右下角，移动端上移避免与控制区重叠） ================= */}
             {gameStatus === 'playing' && dashNearRunway && (
-                <div className="absolute bottom-6 right-8 z-20 pointer-events-none">
+                <div className="absolute bottom-40 right-2 sm:bottom-6 sm:right-8 z-20 pointer-events-none">
                     <div className="bg-black/75 border border-green-500/40 backdrop-blur-sm px-4 py-3 rounded text-xs font-mono text-green-400 min-w-[230px]">
                         <div className="text-green-300 font-bold tracking-widest mb-2 border-b border-green-500/30 pb-1">LANDING CHECKLIST</div>
                         <div className={`flex items-center gap-2 mb-1 ${dashNearRunway.gearOk ? 'text-green-400' : 'text-red-400'}`}>
@@ -1041,28 +1167,28 @@ export default function App() {
                 <div className="absolute inset-0 bg-black/85 backdrop-blur-md flex flex-col justify-center items-center z-50">
                     {gameStatus === 'menu' ? (
                         <>
-                            <h1 className="text-6xl font-black text-white mb-2 tracking-[0.2em] border-b-4 border-green-500 pb-4">AERO DYNAMICS</h1>
-                            <p className="text-green-400 tracking-widest mb-10 text-xl">全真HOTAS模拟 & 跑道降落挑战</p>
+                            <h1 className="text-3xl sm:text-6xl font-black text-white mb-2 tracking-[0.2em] border-b-4 border-green-500 pb-4 text-center">AERO DYNAMICS</h1>
+                            <p className="text-green-400 tracking-widest mb-6 sm:mb-10 text-base sm:text-xl text-center">全真HOTAS模拟 & 跑道降落挑战</p>
                         </>
                     ) : (
                         <>
-                            <h1 className="text-5xl font-black text-red-500 mb-2">MISSION FAILED</h1>
-                            <p className="text-white text-xl mb-4 bg-red-900/50 px-6 py-2 border border-red-500">事故原因: {gameState.current?.failReason}</p>
-                            <p className="text-green-400 text-lg mb-8">总任务积分: <span className="font-bold text-3xl text-white">{uiScore}</span></p>
+                            <h1 className="text-3xl sm:text-5xl font-black text-red-500 mb-2">MISSION FAILED</h1>
+                            <p className="text-white text-base sm:text-xl mb-4 bg-red-900/50 px-4 sm:px-6 py-2 border border-red-500 text-center">事故原因: {gameState.current?.failReason}</p>
+                            <p className="text-green-400 text-base sm:text-lg mb-6 sm:mb-8">总任务积分: <span className="font-bold text-2xl sm:text-3xl text-white">{uiScore}</span></p>
                         </>
                     )}
                     
                     <button 
                         onClick={startGame}
-                        className="px-12 py-4 bg-green-600/20 border-2 border-green-500 text-green-400 hover:bg-green-500 hover:text-white text-2xl font-bold tracking-widest transition-all duration-200"
+                        className="px-8 sm:px-12 py-3 sm:py-4 bg-green-600/20 border-2 border-green-500 text-green-400 hover:bg-green-500 hover:text-white text-xl sm:text-2xl font-bold tracking-widest transition-all duration-200"
                     >
                         {gameStatus === 'menu' ? 'REQUEST TAKEOFF' : 'RESTART SORTIE'}
                     </button>
 
-                    <div className="mt-12 bg-gray-900/90 p-6 border border-gray-700 max-w-4xl text-left shadow-2xl relative overflow-hidden">
+                    <div className="mt-6 sm:mt-12 bg-gray-900/90 p-4 sm:p-6 border border-gray-700 max-w-4xl w-full text-left shadow-2xl relative overflow-hidden mx-2">
                         <div className="absolute top-0 left-0 w-1 h-full bg-green-500"></div>
-                        <h3 className="text-gray-300 font-bold mb-4 tracking-wider">航线简报 (已接入键盘协议)</h3>
-                        <div className="grid grid-cols-3 gap-6 text-sm">
+                        <h3 className="text-gray-300 font-bold mb-3 sm:mb-4 tracking-wider text-sm sm:text-base">航线简报 (已接入键盘协议)</h3>
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6 text-xs sm:text-sm">
                             <div className="space-y-2">
                                 <p><strong className="text-green-400">跑道降落挑战：</strong> 每15个障碍物出现一次跑道，安全触地奖励 <strong className="text-white">+10分</strong>，同时<strong className="text-yellow-300">燃料立刻加满</strong>。跑道随关卡越来越短。</p>
                                 <p className="bg-gray-800 border border-gray-600 p-2 text-gray-300 text-xs">安全降落条件：<br/>1. 必须放下起落架<br/>2. 俯仰角 -5°~+11°（随关卡收紧至 0~+6°）<br/>3. 垂直率 (VY) &lt; 180<br/>4. 空速 (SPD) &lt; 320</p>
