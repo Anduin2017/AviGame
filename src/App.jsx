@@ -6,15 +6,15 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 const MASS = 1.0;                  
 const GRAVITY = 500;               
 const LIFT_COEFF = 0.015;          
-const DRAG_COEFF = 0.05;           
+const DRAG_COEFF = 0.09;           // 提高基础阻力系数；配合三次项，巡航极速≈330 kts
 const MAX_THRUST = 900;            
 const STALL_ANGLE = 0.38;          
 const GEAR_DRAG = 0.15;            
-const FUEL_CONSUMPTION = 2.0;      // 基础燃耗 %/s，按油门线性；另加起落架/襟翼附加消耗
+const FUEL_CONSUMPTION = 1.1;      // 基础燃耗 %/s，按油门线性；另加起落架/襟翼附加消耗
 
 // 降落安全阈值
-const MAX_LANDING_VY = 180;        // 最大安全接地垂直率
-const MAX_LANDING_SPEED = 320;     // 最大安全进场空速
+const MAX_LANDING_VY = 110;        // 最大安全接地垂直率
+const MAX_LANDING_SPEED = 160;     // 最大安全进场空速
 
 export default function App() {
     const canvasRef = useRef(null);
@@ -61,6 +61,23 @@ export default function App() {
         throttle: 0.0,         // 油门完全慢车
         flaps: 1,              // 襟翼 1
         gear: true,            // 起落架放下
+
+        // ---- 视差背景 ----
+        bg: {
+            offsets: [0, 0, 0, 0],  // 4层山脉的水平偏移（最后一层不动）
+            clouds: Array.from({ length: 18 }, (_, i) => {
+                const layer = i % 3; // 0=最远, 1=中, 2=最近
+                const layerSpeeds = [0.04, 0.11, 0.22];
+                return {
+                    x: Math.random() * width * 2.5,
+                    y: 20 + Math.random() * (height * 0.38),
+                    w: 70 + Math.random() * 160,
+                    h: 22 + Math.random() * 40,
+                    speed: layerSpeeds[layer],
+                    layer,
+                };
+            }),
+        },
         
         obstacles: [],
         runways: [{ x: 0, width: 2500, scored: true }], // 起始跑道 (scored避免重复计分)
@@ -245,14 +262,15 @@ export default function App() {
 
         const q = state.speed * state.speed;
         const LiftMag = currentLiftCoeff * q * Math.abs(CL); 
-        const DragMag = DRAG_COEFF * q * CD;
+        // 阻力 = 经典平方项 + 三次方波阻项（高速时急剧增大，模拟压缩性阻力）
+        const DragMag = DRAG_COEFF * q * CD + 0.000003 * state.speed * state.speed * state.speed;
         
         let actualThrust = 0;
         if (state.fuel > 0) {
             actualThrust = MAX_THRUST * state.throttle;
             // 燃料消耗：基础油门消耗 + 起落架阻力附加 + 逐档襟翼附加
-            const gearDrain  = state.gear  ? 0.30 : 0.0;           // 起落架：+0.30%/s
-            const flapsDrain = state.flaps * 0.15;                  // 每档襟翼：+0.15%/s
+            const gearDrain  = state.gear  ? 0.17 : 0.0;           // 起落架：+0.17%/s
+            const flapsDrain = state.flaps * 0.08;                  // 每档襟翼：+0.08%/s
             state.fuel -= (state.throttle * FUEL_CONSUMPTION + gearDrain + flapsDrain) * dt;
             state.fuel = Math.max(0, state.fuel);
 
@@ -354,7 +372,7 @@ export default function App() {
                         ? Math.max(400, Math.round(3000 * Math.pow(0.6, nextNum - 1)))
                         : 400;
                     state.messages.push({ text: `⚠ RUNWAY AHEAD: ${nextWidth}m — PREPARE TO LAND`, life: 4.0 });
-                    state.nextObstacleDist = 1200; 
+                    state.nextObstacleDist = 2500; 
                 } else {
                     state.nextObstacleDist = 650;
                 }
@@ -379,6 +397,21 @@ export default function App() {
             r.x -= dx;
             if (r.x + r.width < -100) state.runways.splice(i, 1);
         }
+
+        // ---- 更新视差背景偏移 ----
+        // 越近的层（index越大）移动越快；最后一层 index=0 完全不动
+        const bgScrollSpeeds = [0, 0.06, 0.18, 0.40];
+        for (let i = 0; i < bgScrollSpeeds.length; i++) {
+            state.bg.offsets[i] += dx * bgScrollSpeeds[i];
+        }
+        // 云朵按各自速度滚动，出屏后从右侧重新随机生成
+        state.bg.clouds.forEach(c => {
+            c.x -= dx * c.speed;
+            if (c.x + c.w < 0) {
+                c.x = canvas.width + c.w + Math.random() * 400;
+                c.y = 20 + Math.random() * (canvas.height * 0.38);
+            }
+        });
 
         // 更新浮动文本
         state.messages.forEach(msg => msg.life -= dt);
@@ -507,17 +540,91 @@ export default function App() {
         const state = gameState.current;
         if (!state) return;
         const w = ctx.canvas.width; const h = ctx.canvas.height;
+        const GROUND_Y = h - 20;
 
-        // 背景
-        ctx.fillStyle = '#1A202C'; ctx.fillRect(0, 0, w, h);
-        ctx.strokeStyle = '#2D3748'; ctx.lineWidth = 1;
-        const offsetX = -(state.worldX % 100);
-        for(let x = offsetX; x < w; x+=100) {
-            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+        // =====================================================
+        // 视差背景 —— 天空 · 星星 · 多层山脉 · 云朵
+        // =====================================================
+
+        // --- 天空渐变（静止）---
+        const skyGrad = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+        skyGrad.addColorStop(0.0,  '#04080f');  // 极深暗蓝
+        skyGrad.addColorStop(0.45, '#0b1929');  // 深夜蓝
+        skyGrad.addColorStop(0.78, '#122240');  // 地平线蓝
+        skyGrad.addColorStop(1.0,  '#1c3355');  // 地平线微亮
+        ctx.fillStyle = skyGrad;
+        ctx.fillRect(0, 0, w, GROUND_Y + 2);
+
+        // --- 星星（静止，用固定伪随机散布）---
+        ctx.save();
+        for (let i = 0; i < 120; i++) {
+            const sx = ((i * 1279 + 37) % 997) / 997 * w;
+            const sy = ((i * 853  + 19) % 991) / 991 * (GROUND_Y * 0.55);
+            const bright = 0.3 + ((i * 521) % 100) / 100 * 0.7;
+            const sr = 0.4 + ((i * 173) % 10) / 10 * 0.8;
+            ctx.globalAlpha = bright;
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath(); ctx.arc(sx, sy, sr, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        ctx.restore();
+
+        // --- 山脉层（从最远→最近，越近越快越暗）---
+        // offsets[0]=不动(最远), offsets[1~3]=逐渐加速
+        const mtLayers = [
+            //  offset              填色         基线比  [频率1,   频率2,   频率3]  [振幅1, 振幅2, 振幅3]
+            { off: state.bg.offsets[0], color:'#1a2b47', base:0.38, freqs:[0.0022,0.0048,0.0097], amps:[0.20,0.10,0.04] },
+            { off: state.bg.offsets[1], color:'#152033', base:0.47, freqs:[0.0036,0.0079,0.0160], amps:[0.15,0.07,0.03] },
+            { off: state.bg.offsets[2], color:'#0f1826', base:0.56, freqs:[0.0055,0.0115,0.0240], amps:[0.11,0.05,0.025]},
+            { off: state.bg.offsets[3], color:'#090f1a', base:0.66, freqs:[0.0080,0.0170,0.0360], amps:[0.08,0.038,0.019]},
+        ];
+        mtLayers.forEach(layer => {
+            ctx.fillStyle = layer.color;
+            ctx.beginPath();
+            ctx.moveTo(0, GROUND_Y + 2);
+            for (let x = 0; x <= w + 5; x += 3) {
+                const xo = x + layer.off;
+                let y = GROUND_Y * layer.base;
+                layer.freqs.forEach((f, fi) => {
+                    y += Math.sin(xo * f + fi * 2.1) * GROUND_Y * layer.amps[fi];
+                });
+                ctx.lineTo(x, y);
+            }
+            ctx.lineTo(w + 5, GROUND_Y + 2);
+            ctx.closePath();
+            ctx.fill();
+        });
+
+        // --- 云朵（按层半透明）---
+        if (state.bg.clouds) {
+            // 云朵颜色按层：越远越暗越淡
+            const cloudColors = [
+                'rgba(110,145,185,0.22)',  // 远
+                'rgba(135,165,200,0.28)',  // 中
+                'rgba(160,185,215,0.35)',  // 近
+            ];
+            // 先画远层云，再画近层云（排序）
+            const sorted = [...state.bg.clouds].sort((a, b) => a.layer - b.layer);
+            sorted.forEach(c => {
+                const col = cloudColors[c.layer];
+                const cx = c.x, cy = c.y, cw = c.w, ch = c.h;
+                ctx.fillStyle = col;
+                // 主体椭圆
+                ctx.beginPath(); ctx.ellipse(cx + cw*0.5, cy + ch*0.55, cw*0.5, ch*0.45, 0, 0, Math.PI*2); ctx.fill();
+                // 左鼓包
+                ctx.beginPath(); ctx.ellipse(cx + cw*0.28, cy + ch*0.6, cw*0.30, ch*0.38, 0, 0, Math.PI*2); ctx.fill();
+                // 右鼓包
+                ctx.beginPath(); ctx.ellipse(cx + cw*0.72, cy + ch*0.6, cw*0.30, ch*0.38, 0, 0, Math.PI*2); ctx.fill();
+                // 顶部小凸起
+                ctx.beginPath(); ctx.ellipse(cx + cw*0.5, cy + ch*0.28, cw*0.22, ch*0.32, 0, 0, Math.PI*2); ctx.fill();
+            });
         }
 
+        // =====================================================
+        // 以下为原有游戏元素
+        // =====================================================
+
         // 绘制通用地面 (非铺装)
-        const GROUND_Y = h - 20;
         ctx.fillStyle = '#171923'; 
         ctx.fillRect(0, GROUND_Y, w, 20);
 
@@ -621,42 +728,10 @@ export default function App() {
         ctx.moveTo(80, -6); ctx.lineTo(80, -15); ctx.stroke();
         ctx.restore();
 
-        ctx.fillStyle = '#00FF00'; ctx.font = '14px monospace'; ctx.textAlign = 'left';
-        
-        ctx.fillText(`SPD:  ${Math.round(state.speed)} kts`, planeX - 50, planeY - 60);
-        ctx.fillStyle = Math.abs(state.aoa) > STALL_ANGLE * 0.8 ? '#FF0000' : '#00FF00';
-        ctx.fillText(`AOA:  ${(state.aoa * 180 / Math.PI).toFixed(1)}°`, planeX - 50, planeY - 45);
-        
-        // HUD 状态指示与降落检查单
-        ctx.fillStyle = '#00FF00';
-        ctx.fillText(`FLP:  ${state.flaps}`, planeX - 50, planeY - 30);
-        if (state.gear) {
-            ctx.fillStyle = '#FFA500';
-            ctx.fillText(`GEAR: DOWN`, planeX - 50, planeY - 15);
-        }
-
-        // 降落检查单：仅在有起落架 且 在某跑道中点前700px范围内时显示
-        const nearRunway = state.runways.find(r => {
-            const midScreen = r.x + r.width / 2;
-            return !r.scored && midScreen > planeX && (midScreen - planeX) < 700;
-        });
-        if (state.gear && nearRunway) {
-            // 俯仰安全范围随已完成跑道数收敛：-5~+11 → 0~+6（8次后锁死）
-            const t = Math.min(1, state.runwaysGenerated / 8);
-            const minPitchDisp = -5 + 5 * t;   // -5 → 0
-            const maxPitchDisp = 11 - 5 * t;   // 11 → 6
-
-            const vyOk = state.vy < MAX_LANDING_VY;
-            const spdOk = state.speed < MAX_LANDING_SPEED;
-            const pitchDegHud = -(state.pitch * 180 / Math.PI); // 正=抬头/爬升
-            const pitchOk = pitchDegHud >= minPitchDisp && pitchDegHud <= maxPitchDisp;
-            const allOk = vyOk && spdOk && pitchOk;
-            ctx.font = '14px monospace'; ctx.textAlign = 'left';
-            ctx.fillStyle = allOk ? '#00FF00' : '#FF0000';
-            ctx.fillText(`LND CHK: ${allOk ? 'OK' : 'WARN'}`, planeX - 50, planeY + 30);
-            ctx.fillStyle = pitchOk ? '#00FF00' : '#FF0000';
-            ctx.fillText(`PCH: ${pitchDegHud.toFixed(1)}° [${minPitchDisp.toFixed(0)}~+${maxPitchDisp.toFixed(0)}]`, planeX - 50, planeY + 45);
-        }
+        // --- 仅保留 AOA 于飞机旁 ---
+        ctx.font = '13px monospace'; ctx.textAlign = 'left';
+        ctx.fillStyle = Math.abs(state.aoa) > STALL_ANGLE * 0.8 ? '#FF4444' : '#00FF00';
+        ctx.fillText(`AOA ${(state.aoa * 180 / Math.PI).toFixed(1)}°`, planeX - 50, planeY - 42);
 
         // 浮动文本绘制
         state.messages.forEach((msg, idx) => {
@@ -722,12 +797,39 @@ export default function App() {
 
     const [dashFuel, setDashFuel] = useState(100);
     const [dashAlt, setDashAlt] = useState(0);
+    const [dashVS, setDashVS] = useState(0);
+    const [dashSpd, setDashSpd] = useState(0);
+    const [dashNearRunway, setDashNearRunway] = useState(null);
     useEffect(() => {
         if (gameStatus !== 'playing') return;
         const interval = setInterval(() => {
             if (gameState.current) {
-                setDashFuel(gameState.current.fuel);
-                setDashAlt(Math.max(0, Math.round((window.innerHeight - 20 - gameState.current.y) * 10))); 
+                const s = gameState.current;
+                const cw = canvasRef.current?.width ?? window.innerWidth;
+                const ch = canvasRef.current?.height ?? window.innerHeight;
+                setDashFuel(s.fuel);
+                setDashAlt(Math.max(0, Math.round((ch - 20 - s.y) * 10)));
+                setDashVS(Math.round(-s.vy));   // positive = climbing
+                setDashSpd(Math.round(s.speed));
+                const planeX = cw * 0.2;
+                const near = s.runways.find(r => {
+                    const mid = r.x + r.width / 2;
+                    return !r.scored && mid > planeX && (mid - planeX) < 700;
+                });
+                if (near) {
+                    const t = Math.min(1, s.runwaysGenerated / 8);
+                    const minP = -5 + 5 * t;
+                    const maxP = 11 - 5 * t;
+                    const pitchDeg = -(s.pitch * 180 / Math.PI);
+                    const pitchOk = pitchDeg >= minP && pitchDeg <= maxP;
+                    const vyOk   = s.vy < MAX_LANDING_VY;
+                    const spdOk  = s.speed < MAX_LANDING_SPEED;
+                    const gearOk = s.gear;
+                    setDashNearRunway({ pitchDeg, minP, maxP, pitchOk, vyOk, spdOk, gearOk,
+                        speed: s.speed, vs: s.vy, allOk: pitchOk && vyOk && spdOk && gearOk });
+                } else {
+                    setDashNearRunway(null);
+                }
             }
         }, 100);
         return () => clearInterval(interval);
@@ -738,19 +840,37 @@ export default function App() {
             <canvas ref={canvasRef} className="block w-full h-full" />
 
             <div className="absolute top-4 w-full flex justify-between px-10 pointer-events-none text-green-400 z-10">
+                {/* 空速 — 左 */}
                 <div className="flex flex-col items-start bg-green-900/20 px-4 py-2 rounded border border-green-500/30 backdrop-blur-sm">
-                    <span className="text-xs text-green-200">ALTITUDE</span>
-                    <span className="text-3xl font-bold">{dashAlt} FT</span>
+                    <span className="text-xs text-green-200 tracking-widest">AIRSPEED</span>
+                    <span className="text-3xl font-bold">{dashSpd} <span className="text-base font-normal opacity-70">KTS</span></span>
                 </div>
+                {/* 积分 — 中 */}
                 <div className="flex flex-col items-center">
                     <span className="text-xs text-green-200 tracking-widest">MISSION SCORE</span>
                     <span className="text-5xl font-black text-white drop-shadow-[0_0_10px_#4ADE80]">{uiScore}</span>
                 </div>
-                <div className="flex flex-col items-end bg-green-900/20 px-4 py-2 rounded border border-green-500/30 backdrop-blur-sm">
-                    <span className="text-xs text-green-200">FUEL QTY</span>
-                    <div className="w-32 h-4 bg-gray-800 border border-green-500 mt-1">
-                        <div className="h-full transition-all duration-200"
-                            style={{ width: `${Math.max(0, dashFuel)}%`, backgroundColor: dashFuel > 20 ? '#4ADE80' : '#F87171' }}/>
+                {/* 高度 + 垂直速度 + 燃料 — 右 */}
+                <div className="flex flex-col items-end gap-1">
+                    <div className="flex items-end gap-4 bg-green-900/20 px-4 py-2 rounded border border-green-500/30 backdrop-blur-sm">
+                        <div className="flex flex-col items-end">
+                            <span className="text-xs text-green-200 tracking-widest">ALTITUDE</span>
+                            <span className="text-3xl font-bold">{dashAlt} <span className="text-base font-normal opacity-70">FT</span></span>
+                        </div>
+                        <div className="flex flex-col items-end border-l border-green-500/30 pl-4">
+                            <span className="text-xs text-green-200 tracking-widest">V/S</span>
+                            <span className={`text-xl font-bold ${
+                                dashVS > 30 ? 'text-green-400' : dashVS < -30 ? 'text-orange-400' : 'text-yellow-400'
+                            }`}>{dashVS > 0 ? '+' : ''}{dashVS}</span>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2 bg-green-900/20 px-4 py-1.5 rounded border border-green-500/30 backdrop-blur-sm w-full">
+                        <span className="text-[10px] text-green-200 tracking-widest">FUEL</span>
+                        <div className="flex-1 h-3 bg-gray-800 border border-green-500/50">
+                            <div className="h-full transition-all duration-200"
+                                style={{ width: `${Math.max(0, dashFuel)}%`, backgroundColor: dashFuel > 20 ? '#4ADE80' : '#F87171' }}/>
+                        </div>
+                        <span className="text-[10px] text-green-200 w-8 text-right">{Math.round(dashFuel)}%</span>
                     </div>
                 </div>
             </div>
@@ -790,17 +910,52 @@ export default function App() {
 
             {/* ================= 右手侧：HOTAS 油门与控制面板 ================= */}
             <div className="absolute right-8 top-1/2 -translate-y-1/2 h-[500px] flex items-center gap-6 pointer-events-none z-20">
-                <div className="flex flex-col items-center gap-12 pointer-events-auto h-full justify-center mt-10">
-                    <div className="flex flex-col items-center relative group">
-                        <span className="text-[10px] text-gray-400 mb-2 font-bold tracking-widest">GEAR (G)</span>
-                        <div 
+                {/* ===== 起落架手柄 ===== */}
+                <div className="flex flex-col items-center pointer-events-auto select-none">
+                    <span className="text-[10px] text-gray-400 mb-1 font-bold tracking-widest">GEAR (G)</span>
+                    {/* 滑轨 */}
+                    <div className="relative w-12 h-40 bg-gray-950 border border-gray-600 rounded-2xl shadow-[inset_0_0_12px_rgba(0,0,0,0.8)]">
+                        {/* UP / DN 标签 */}
+                        <span className="absolute top-2 left-1/2 -translate-x-1/2 text-[9px] text-gray-500 font-bold z-10 pointer-events-none">UP</span>
+                        <span className="absolute bottom-2 left-1/2 -translate-x-1/2 text-[9px] text-gray-500 font-bold z-10 pointer-events-none">DN</span>
+                        {/* 中央导轨线 */}
+                        <div className="absolute top-6 bottom-6 left-1/2 -translate-x-1/2 w-0.5 bg-gray-700 rounded-full"></div>
+                        {/* 手柄（带轮子图案）*/}
+                        <div
                             onClick={toggleGear}
-                            className={`w-16 h-16 rounded-full border-4 cursor-pointer transition-all duration-200 flex items-center justify-center shadow-lg ${
-                                isGearDown ? 'bg-orange-500 border-orange-200 shadow-[0_0_15px_orange]' : 'bg-gray-800 border-gray-600'
+                            style={{
+                                top: isGearDown ? '76px' : '8px',
+                                transition: 'top 0.45s cubic-bezier(0.25,0.46,0.45,0.94)',
+                            }}
+                            className={`absolute left-1/2 -translate-x-1/2 w-11 h-14 rounded-xl cursor-pointer flex flex-col items-center justify-center gap-0.5 shadow-lg border-2 ${
+                                isGearDown
+                                    ? 'bg-gradient-to-b from-orange-600 to-orange-800 border-orange-400 shadow-[0_0_12px_rgba(251,146,60,0.6)]'
+                                    : 'bg-gradient-to-b from-gray-500 to-gray-700 border-gray-400'
                             }`}
                         >
-                            <span className={`font-black text-sm ${isGearDown ? 'text-white' : 'text-gray-500'}`}>DN</span>
+                            {/* 轮子 SVG */}
+                            <svg width="26" height="26" viewBox="0 0 26 26" fill="none">
+                                <circle cx="13" cy="13" r="11" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="2.2"/>
+                                <circle cx="13" cy="13" r="3" fill={isGearDown ? '#fcd34d' : '#9ca3af'}/>
+                                <line x1="13" y1="2" x2="13" y2="24" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="1.4"/>
+                                <line x1="2" y1="13" x2="24" y2="13" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="1.4"/>
+                                <line x1="4.8" y1="4.8" x2="21.2" y2="21.2" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="1.4"/>
+                                <line x1="21.2" y1="4.8" x2="4.8" y2="21.2" stroke={isGearDown ? '#fcd34d' : '#9ca3af'} strokeWidth="1.4"/>
+                            </svg>
+                            {/* 手柄纹理横条 */}
+                            <div className="flex flex-col gap-0.5">
+                                <div className={`w-7 h-0.5 rounded-full ${isGearDown ? 'bg-orange-300/50' : 'bg-gray-400/40'}`}></div>
+                                <div className={`w-7 h-0.5 rounded-full ${isGearDown ? 'bg-orange-300/50' : 'bg-gray-400/40'}`}></div>
+                            </div>
                         </div>
+                    </div>
+                    {/* 三绿灯：起落架锁定指示 */}
+                    <div className="mt-2 flex gap-1.5">
+                        {[0,1,2].map(i => (
+                            <div key={i} className={`w-2.5 h-2.5 rounded-full border transition-all duration-300 ${
+                                isGearDown ? 'bg-green-400 border-green-300 shadow-[0_0_5px_#4ADE80]' : 'bg-gray-800 border-gray-600'
+                            }`}/>
+                        ))}
                     </div>
                 </div>
 
@@ -850,6 +1005,36 @@ export default function App() {
                     </div>
                 </div>
             </div>
+
+            {/* ================= 着陆检查单（右下角） ================= */}
+            {gameStatus === 'playing' && dashNearRunway && (
+                <div className="absolute bottom-6 right-8 z-20 pointer-events-none">
+                    <div className="bg-black/75 border border-green-500/40 backdrop-blur-sm px-4 py-3 rounded text-xs font-mono text-green-400 min-w-[230px]">
+                        <div className="text-green-300 font-bold tracking-widest mb-2 border-b border-green-500/30 pb-1">LANDING CHECKLIST</div>
+                        <div className={`flex items-center gap-2 mb-1 ${dashNearRunway.gearOk ? 'text-green-400' : 'text-red-400'}`}>
+                            <span className="w-4">{dashNearRunway.gearOk ? '✓' : '✗'}</span>
+                            <span>GEAR DOWN</span>
+                        </div>
+                        <div className={`flex items-center gap-2 mb-1 ${dashNearRunway.spdOk ? 'text-green-400' : 'text-red-400'}`}>
+                            <span className="w-4">{dashNearRunway.spdOk ? '✓' : '✗'}</span>
+                            <span>SPD &lt; {MAX_LANDING_SPEED}  <span className="opacity-70">({Math.round(dashNearRunway.speed)})</span></span>
+                        </div>
+                        <div className={`flex items-center gap-2 mb-1 ${dashNearRunway.vyOk ? 'text-green-400' : 'text-red-400'}`}>
+                            <span className="w-4">{dashNearRunway.vyOk ? '✓' : '✗'}</span>
+                            <span>V/S &lt; {MAX_LANDING_VY}  <span className="opacity-70">({Math.round(dashNearRunway.vs)})</span></span>
+                        </div>
+                        <div className={`flex items-center gap-2 mb-2 ${dashNearRunway.pitchOk ? 'text-green-400' : 'text-red-400'}`}>
+                            <span className="w-4">{dashNearRunway.pitchOk ? '✓' : '✗'}</span>
+                            <span>PITCH {dashNearRunway.pitchDeg.toFixed(1)}°  <span className="opacity-70">[{dashNearRunway.minP.toFixed(0)}~+{dashNearRunway.maxP.toFixed(0)}]</span></span>
+                        </div>
+                        <div className={`text-center font-black tracking-widest border-t pt-1.5 ${
+                            dashNearRunway.allOk ? 'text-green-400 border-green-500/40' : 'text-red-400 border-red-500/40'
+                        }`}>
+                            {dashNearRunway.allOk ? '✈  CLEARED TO LAND' : '⚠  CORRECT & RETRY'}
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* ================= 菜单 / 任务简报界面 ================= */}
             {gameStatus !== 'playing' && (
