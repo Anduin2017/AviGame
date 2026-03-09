@@ -317,7 +317,9 @@ export default function App() {
             // 燃料消耗：基础油门消耗 + 起落架阻力附加 + 逐档襟翼附加
             const gearDrain  = state.gear  ? 0.12 : 0.0;           // 起落架：+0.12%/s
             const flapsDrain = state.flaps * 0.08;                  // 每档襟翼：+0.08%/s
-            state.fuel -= (state.throttle * FUEL_CONSUMPTION + gearDrain + flapsDrain) * dt;
+            const totalDrain = state.throttle * FUEL_CONSUMPTION + gearDrain + flapsDrain;
+            // 油箱容量增大40%，等效于消耗速度除以 1.4
+            state.fuel -= (totalDrain / 1.4) * dt;
             state.fuel = Math.max(0, state.fuel);
 
             // 低燃料警告（只弹一次）
@@ -504,24 +506,22 @@ export default function App() {
         const py = state.y;
         const hitboxRadius = 14;
 
-        // 油箱收集检测（飞机必须在地面滑过油箱位置才能加油）
+        // 油箱收集检测（只要飞机和油箱位置重叠即可，不要求在地面）
+        const tankY = canvas.height - 20 - 13; // GROUND_Y - 13
         for (let r of state.runways) {
             if (r.fuelTankX !== undefined && !r.fuelTankCollected) {
                 const relX = r.fuelTankX - px; // 正=油箱在飞机右前方，负=油箱已在飞机后方
-                if (relX <= 0 && relX >= -80) {
-                    // 油箱刚刚滚过飞机位置的窗口期（80px 容差）
-                    if (state.onGround) {
-                        // 飞机在地面 → 成功拾取
-                        r.fuelTankCollected = true;
-                        state.fuel = 100;
-                        state.lowFuelWarned20 = false;
-                        state.lowFuelWarned10 = false;
-                        state.flameoutWarned  = false;
-                        state.messages.push({ text: '⛽ 燃油已满！FUEL FULL', life: 3.5 });
-                    }
-                    // 若飞机在空中飞越油箱，不触发（油箱继续留在跑道等待）
+                const relY = tankY - py;
+                if (relX <= 40 && relX >= -80 && Math.abs(relY) < 80) {
+                    // 飞机与油箱发生重叠 → 成功拾取
+                    r.fuelTankCollected = true;
+                    state.fuel = 100;
+                    state.lowFuelWarned20 = false;
+                    state.lowFuelWarned10 = false;
+                    state.flameoutWarned  = false;
+                    state.messages.push({ text: '⛽ 燃油已满！FUEL FULL', life: 3.5 });
                 } else if (relX < -80) {
-                    // 油箱已远远滚过，且飞机从未在地面经过 → 错过，移除标志
+                    // 油箱已远远滚过，且未发生重叠 → 错过，移除标志
                     r.fuelTankCollected = true;
                 }
             }
