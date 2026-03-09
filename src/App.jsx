@@ -9,7 +9,7 @@ const LIFT_COEFF = 0.015;
 const DRAG_COEFF = 0.09;           // 提高基础阻力系数；配合三次项，巡航极速≈330 kts
 const MAX_THRUST = 900;            
 const STALL_ANGLE = 0.38;          
-const GEAR_DRAG = 0.15;            
+const GEAR_DRAG = 0.10;            
 const FUEL_CONSUMPTION = 1.1;      // 基础燃耗 %/s，按油门线性；另加起落架/襟翼附加消耗
 
 // 降落安全阈值
@@ -269,7 +269,7 @@ export default function App() {
         if (state.fuel > 0) {
             actualThrust = MAX_THRUST * state.throttle;
             // 燃料消耗：基础油门消耗 + 起落架阻力附加 + 逐档襟翼附加
-            const gearDrain  = state.gear  ? 0.17 : 0.0;           // 起落架：+0.17%/s
+            const gearDrain  = state.gear  ? 0.12 : 0.0;           // 起落架：+0.12%/s
             const flapsDrain = state.flaps * 0.08;                  // 每档襟翼：+0.08%/s
             state.fuel -= (state.throttle * FUEL_CONSUMPTION + gearDrain + flapsDrain) * dt;
             state.fuel = Math.max(0, state.fuel);
