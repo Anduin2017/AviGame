@@ -404,15 +404,15 @@ export default function App() {
             } else {
                 // 生成普通障碍物
                 const baseGap = 250;
-                const minGapRatio = 0.125; 
-                const gapRatio = Math.max(minGapRatio, Math.pow(0.5, state.obstaclesGenerated / 60));
+                const minGapRatio = 0.25; 
+                const gapRatio = Math.max(minGapRatio, Math.pow(0.5, state.obstaclesGenerated / 120));
                 const gapSize = baseGap * gapRatio;
 
                 const safeMinPillar = Math.min(120, canvas.height * 0.2);
                 const safeMaxGapTop = Math.max(safeMinPillar, canvas.height - safeMinPillar - gapSize);
 
-                // 前50个障碍物：开口位置锁定在屏幕中央，随进度线性扩展到完全随机
-                const progressRatio = Math.min(1, state.obstaclesGenerated / 50);
+                // 前100个障碍物：开口位置锁定在屏幕中央，随进度线性扩展到完全随机
+                const progressRatio = Math.min(1, state.obstaclesGenerated / 100);
                 const centerY = canvas.height / 2 - gapSize / 2;
                 const interpolatedMin = centerY * (1 - progressRatio) + safeMinPillar * progressRatio;
                 const interpolatedMax = centerY * (1 - progressRatio) + safeMaxGapTop * progressRatio;
