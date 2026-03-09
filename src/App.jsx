@@ -175,6 +175,7 @@ export default function App() {
     };
 
     const handleStickDown = (e) => {
+        e.stopPropagation();
         if (gameStatus !== 'playing') return;
         
         if (e.pointerType === 'mouse') {
@@ -219,6 +220,7 @@ export default function App() {
     };
 
     const handleThrottleDown = (e) => {
+        e.stopPropagation();
         if (gameStatus !== 'playing') return;
         
         if (e.pointerType === 'mouse') {
@@ -986,7 +988,43 @@ export default function App() {
     }, [gameStatus]);
 
     return (
-        <div className="relative w-full h-screen bg-black overflow-hidden touch-none select-none font-mono">
+        <div 
+            className="relative w-full h-screen bg-black overflow-hidden touch-none select-none font-mono"
+            onPointerDown={(e) => {
+                if (e.pointerType === 'mouse') {
+                    if (isDraggingStick.current) {
+                        isDraggingStick.current = false;
+                        setKnobY(0);
+                        if (gameState.current) gameState.current.inputY = 0;
+                    }
+                    if (isDraggingThrottle.current) {
+                        isDraggingThrottle.current = false;
+                    }
+                }
+            }}
+            onPointerMove={(e) => {
+                if (gameStatus !== 'playing') return;
+                if (e.pointerType === 'mouse') {
+                    if (isDraggingStick.current && stickTrackRef.current) {
+                        const rect = stickTrackRef.current.getBoundingClientRect();
+                        const centerY = rect.top + rect.height / 2;
+                        let dy = e.clientY - centerY;
+                        const maxDy = rect.height / 2 - 20;
+                        dy = Math.max(-maxDy, Math.min(maxDy, dy));
+                        setKnobY(dy);
+                        if (gameState.current) gameState.current.inputY = dy / maxDy; 
+                    }
+                    if (isDraggingThrottle.current && throttleTrackRef.current) {
+                        const rect = throttleTrackRef.current.getBoundingClientRect();
+                        let y = e.clientY - rect.top;
+                        const maxY = rect.height - 40;
+                        y = Math.max(0, Math.min(maxY, y));
+                        setThrottleY(y);
+                        if (gameState.current) gameState.current.throttle = 1 - (y / maxY);
+                    }
+                }
+            }}
+        >
             <canvas ref={canvasRef} className="block w-full h-full" />
 
             <div className="absolute top-2 w-full flex justify-between px-2 sm:top-4 sm:px-10 pointer-events-none text-green-400 z-10">
