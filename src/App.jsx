@@ -161,10 +161,8 @@ export default function App() {
     }, [gameStatus]);
 
     // ================= 左手：飞行摇杆事件 =================
-    const handleStickEvent = (e, isDown) => {
-        if (gameStatus !== 'playing') return;
-        if (isDown !== undefined) isDraggingStick.current = isDown;
-        if (!isDraggingStick.current) return;
+    const handleStickEvent = (e) => {
+        if (gameStatus !== 'playing' || !isDraggingStick.current) return;
 
         const rect = stickTrackRef.current.getBoundingClientRect();
         const centerY = rect.top + rect.height / 2;
@@ -176,17 +174,40 @@ export default function App() {
         gameState.current.inputY = dy / maxDy; 
     };
 
+    const handleStickDown = (e) => {
+        if (gameStatus !== 'playing') return;
+        
+        if (e.pointerType === 'mouse') {
+            if (isDraggingStick.current) {
+                handleStickUp();
+                try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (err) {}
+            } else {
+                isDraggingStick.current = true;
+                try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {}
+                handleStickEvent(e);
+            }
+        } else {
+            isDraggingStick.current = true;
+            try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {}
+            handleStickEvent(e);
+        }
+    };
+
     const handleStickUp = () => {
         isDraggingStick.current = false;
         setKnobY(0);
         if (gameState.current) gameState.current.inputY = 0;
     };
 
+    const handleStickPointerUp = (e) => {
+        if (e.pointerType === 'mouse') return; 
+        handleStickUp();
+        try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (err) {}
+    };
+
     // ================= 右手：HOTAS 油门与控制台事件 =================
-    const handleThrottleEvent = (e, isDown) => {
-        if (gameStatus !== 'playing') return;
-        if (isDown !== undefined) isDraggingThrottle.current = isDown;
-        if (!isDraggingThrottle.current) return;
+    const handleThrottleEvent = (e) => {
+        if (gameStatus !== 'playing' || !isDraggingThrottle.current) return;
 
         const rect = throttleTrackRef.current.getBoundingClientRect();
         let y = e.clientY - rect.top;
@@ -195,6 +216,31 @@ export default function App() {
         
         setThrottleY(y);
         gameState.current.throttle = 1 - (y / maxY);
+    };
+
+    const handleThrottleDown = (e) => {
+        if (gameStatus !== 'playing') return;
+        
+        if (e.pointerType === 'mouse') {
+            if (isDraggingThrottle.current) {
+                isDraggingThrottle.current = false;
+                try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (err) {}
+            } else {
+                isDraggingThrottle.current = true;
+                try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {}
+                handleThrottleEvent(e);
+            }
+        } else {
+            isDraggingThrottle.current = true;
+            try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {}
+            handleThrottleEvent(e);
+        }
+    };
+
+    const handleThrottlePointerUp = (e) => {
+        if (e.pointerType === 'mouse') return;
+        isDraggingThrottle.current = false;
+        try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (err) {}
     };
 
     const toggleGear = () => {
@@ -992,10 +1038,10 @@ export default function App() {
             {/* 移动端: 左下角小型控制杆；桌面端: 左侧居中大型控制杆 */}
             <div className="absolute left-2 bottom-3 sm:left-8 sm:bottom-auto sm:top-1/2 sm:-translate-y-1/2 flex items-end sm:items-center pointer-events-none z-20">
                 <div 
-                    className="relative w-20 h-[170px] sm:w-32 sm:h-[450px] flex justify-center items-center pointer-events-auto touch-none"
-                    onPointerDown={(e) => { e.target.setPointerCapture(e.pointerId); handleStickEvent(e, true); }}
+                    className="relative w-20 h-[170px] sm:w-32 sm:h-[450px] flex justify-center items-center pointer-events-auto touch-none cursor-ns-resize"
+                    onPointerDown={handleStickDown}
                     onPointerMove={handleStickEvent}
-                    onPointerUp={(e) => { handleStickUp(); try{e.target.releasePointerCapture(e.pointerId)}catch(e){} }}
+                    onPointerUp={handleStickPointerUp}
                 >
                     <div ref={stickTrackRef} className="relative w-7 h-[130px] sm:w-10 sm:h-[300px] bg-gray-900/80 rounded-full border border-gray-600 shadow-[inset_0_0_20px_#000] flex justify-center items-center pointer-events-none">
                         <div className="absolute w-8 sm:w-12 h-[80%] border-x-4 border-gray-800 rounded-full opacity-50"></div>
@@ -1108,11 +1154,11 @@ export default function App() {
                 <div className="relative flex flex-col items-center h-[130px] sm:h-full ml-1 sm:ml-4">
                     <span className="hidden sm:block text-green-400 font-bold mb-3 tracking-widest">THR (PgUp/Dn)</span>
                     <div 
-                        className="relative w-8 sm:w-16 h-[110px] sm:flex-1 bg-gray-900 rounded-sm border-2 border-gray-600 pointer-events-auto shadow-[0_0_20px_rgba(0,0,0,0.8)] touch-none"
+                        className="relative w-8 sm:w-16 h-[110px] sm:flex-1 bg-gray-900 rounded-sm border-2 border-gray-600 pointer-events-auto shadow-[0_0_20px_rgba(0,0,0,0.8)] touch-none cursor-ns-resize"
                         ref={throttleTrackRef}
-                        onPointerDown={(e) => { e.target.setPointerCapture(e.pointerId); handleThrottleEvent(e, true); }}
+                        onPointerDown={handleThrottleDown}
                         onPointerMove={handleThrottleEvent}
-                        onPointerUp={(e) => { handleThrottleEvent(e, false); try{e.target.releasePointerCapture(e.pointerId)}catch(e){} }}
+                        onPointerUp={handleThrottlePointerUp}
                     >
                         <div className="absolute left-0 w-full h-full flex flex-col justify-between py-2 sm:py-4 pointer-events-none opacity-50">
                             {[100,60,20].map(val => (
@@ -1190,6 +1236,7 @@ export default function App() {
                         <h3 className="text-gray-300 font-bold mb-3 sm:mb-4 tracking-wider text-sm sm:text-base">航线简报 (已接入键盘协议)</h3>
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6 text-xs sm:text-sm">
                             <div className="space-y-2">
+                                <p><strong className="text-green-400">PC/鼠标操作：</strong> 点击摇杆或油门开启<strong className="text-white">控制模式</strong>，再次点击释放。移动鼠标可实时微调位置。</p>
                                 <p><strong className="text-green-400">跑道降落挑战：</strong> 每15个障碍物出现一次跑道，安全触地奖励 <strong className="text-white">+10分</strong>，同时<strong className="text-yellow-300">燃料立刻加满</strong>。跑道随关卡越来越短。</p>
                                 <p className="bg-gray-800 border border-gray-600 p-2 text-gray-300 text-xs">安全降落条件：<br/>1. 必须放下起落架<br/>2. 俯仰角 -5°~+11°（随关卡收紧至 0~+6°）<br/>3. 垂直率 (VY) &lt; 180<br/>4. 空速 (SPD) &lt; 320</p>
                             </div>
