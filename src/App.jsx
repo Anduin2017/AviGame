@@ -384,10 +384,8 @@ export default function App() {
                 const runwayWidth = state.runwaysGenerated <= 4
                     ? Math.max(MIN_RUNWAY_WIDTH, Math.round(BASE_RUNWAY_WIDTH * Math.pow(0.6, state.runwaysGenerated - 1)))
                     : MIN_RUNWAY_WIDTH;
-                // 油箱位于跑道进近端（右侧）前 35% 处
-                // 平面坐标: 跑道从 canvas.width+100 起，向右延伸 runwayWidth
-                // 进近方向为向左（plane 从右侧飞入），所以 35% 区域靠近右端
-                const fuelTankOffsetFromLeft = runwayWidth * 0.65; // 距左端 65% = 距右端 35%
+                // 油箱位于跑道正中央
+                const fuelTankOffsetFromLeft = runwayWidth * 0.5; // 距左端 50% = 距右端 50%
                 state.runways.push({
                     x: SPAWN_X,
                     width: runwayWidth,
@@ -785,12 +783,6 @@ export default function App() {
                 ctx.textAlign = 'center';
                 ctx.fillStyle = '#FFD700';
                 ctx.fillText('⛽', tx, by - 10);
-
-                // 下方地面标线（黄色区域提示）
-                ctx.globalAlpha = 0.35;
-                ctx.fillStyle = '#FFD700';
-                ctx.fillRect(r.x + r.width * 0.60, ty, r.width * 0.40, 20);
-                ctx.globalAlpha = 1.0;
 
                 ctx.restore();
             }
