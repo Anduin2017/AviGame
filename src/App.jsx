@@ -508,11 +508,11 @@ export default function App() {
                 // 如果是瞬间刚接触地面
                 if (!state.onGround) {
                     // 接地姿态检查：画布坐标系中 pitch 负值=抬头，正值=低头，与航空惯例相反
-                    // 显示值 = -pitchInternal；安全范围随已完成跑道数收敛：-5~+11 → 0~+6
+                    // 显示值 = -pitchInternal；安全范围随已完成跑道数收敛：-7~+15 → -3~+11
                     const pitchDeg = state.pitch * 180 / Math.PI; // 内部值
                     const t = Math.min(1, state.runwaysGenerated / 8);
-                    const minPitchDisp = -5 + 5 * t;   // -5 → 0
-                    const maxPitchDisp = 11 - 5 * t;   // 11 → 6
+                    const minPitchDisp = -7 + 4 * t;   // -7 → -3
+                    const maxPitchDisp = 15 - 4 * t;   // 15 → 11
                     // 内部安全范围 = [-maxPitchDisp, -minPitchDisp]
                     const PITCH_INTERNAL_MIN = -maxPitchDisp;
                     const PITCH_INTERNAL_MAX = -minPitchDisp;
@@ -926,13 +926,12 @@ export default function App() {
                 setDashSpd(Math.round(s.speed));
                 const planeX = cw * 0.2;
                 const near = s.runways.find(r => {
-                    const mid = r.x + r.width / 2;
-                    return !r.scored && mid > planeX && (mid - planeX) < 700;
+                    return !r.scored && (planeX < r.x + r.width) && (r.x - planeX < 1200);
                 });
                 if (near) {
                     const t = Math.min(1, s.runwaysGenerated / 8);
-                    const minP = -5 + 5 * t;
-                    const maxP = 11 - 5 * t;
+                    const minP = -7 + 4 * t;
+                    const maxP = 15 - 4 * t;
                     const pitchDeg = -(s.pitch * 180 / Math.PI);
                     const pitchOk = pitchDeg >= minP && pitchDeg <= maxP;
                     const vyOk   = s.vy < MAX_LANDING_VY;
@@ -1191,7 +1190,7 @@ export default function App() {
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6 text-xs sm:text-sm">
                             <div className="space-y-2">
                                 <p><strong className="text-green-400">跑道降落挑战：</strong> 每15个障碍物出现一次跑道，安全触地奖励 <strong className="text-white">+10分</strong>，同时<strong className="text-yellow-300">燃料立刻加满</strong>。跑道随关卡越来越短。</p>
-                                <p className="bg-gray-800 border border-gray-600 p-2 text-gray-300 text-xs">安全降落条件：<br/>1. 必须放下起落架<br/>2. 俯仰角 -5°~+11°（随关卡收紧至 0~+6°）<br/>3. 垂直率 (VY) &lt; 180<br/>4. 空速 (SPD) &lt; 320</p>
+                                <p className="bg-gray-800 border border-gray-600 p-2 text-gray-300 text-xs">安全降落条件：<br/>1. 必须放下起落架<br/>2. 俯仰角 -7°~+15°（随关卡收紧至 -3°~+11°）<br/>3. 垂直率 (VY) &lt; 110<br/>4. 空速 (SPD) &lt; 160</p>
                             </div>
                             <div className="space-y-2">
                                 <p><strong className="text-orange-400">燃料管理：</strong></p>
